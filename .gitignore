@@ -1,0 +1,38 @@
+# Build output
+/target/
+/debug/
+/release/
+
+# Generated documentation
+/doc/
+
+# Benchmarks output
+/criterion/
+
+# Coverage
+/coverage/
+lcov.info
+*.profraw
+*.profdata
+
+# Environment
+.env
+.env.*
+!.env.example
+.envrc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# flamegraph / perf
+perf.data
+perf.data.old
+flamegraph.svg
