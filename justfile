@@ -55,9 +55,12 @@ run *args:
 run-snapshot *args:
     sudo cargo run -- --duration 5 {{args}}
 
-# Install netoproc to ~/.cargo/bin
+# Install netoproc to ~/.cargo/bin and fish completions
 install:
     cargo install --path .
+    mkdir -p ~/.config/fish/completions
+    cp completions/netoproc.fish ~/.config/fish/completions/
+    @echo "Installed netoproc and fish completions"
 
 # Generate and open documentation
 doc:

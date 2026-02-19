@@ -6,6 +6,8 @@ description = "Per-process network traffic monitor for macOS"
 license = "MIT"
 repository = "https://github.com/XuanLee-HEALER/netoproc"
 readme = "README.md"
+keywords = ["network", "monitor", "bpf", "macos", "tui"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
