@@ -1,7 +1,7 @@
 // Raw packet header parser for BPF buffer data.
 //
 // Parses Ethernet + IPv4/IPv6 + TCP/UDP/ICMP headers from raw BPF capture buffers.
-// See DESIGN.md §4.4 and §7.2 for specification.
+// See netoproc-design.md §4.4 and §7.2 for specification.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

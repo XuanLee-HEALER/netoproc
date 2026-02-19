@@ -3,8 +3,8 @@
 ## Project Overview
 
 netop is a macOS-only (26.0+) TUI/CLI tool for per-process network traffic monitoring.
-Written in Rust. Requires sudo to run. See REQUIREMENTS.md, DESIGN.md, TESTING.md,
-USAGE.md for full specifications.
+Written in Rust. Requires sudo to run. See netoproc-requirements.md, netoproc-design.md, netoproc-snapshot-tests.md,
+netoproc-usage.md for full specifications.
 
 ## Toolchain
 
@@ -40,6 +40,7 @@ just fmt            # cargo fmt
 just fmt-check      # cargo fmt --check
 just lint           # check + clippy + fmt-check combined
 just clean          # cargo clean
+just install        # cargo install --path .
 just run            # sudo cargo run
 just run-snapshot   # sudo cargo run -- --duration 5
 just doc            # cargo doc --no-deps --open
@@ -52,7 +53,7 @@ Run `just --list` to see all available recipes.
 - All user-facing text (help, errors, TUI, output) in **English**
 - All code identifiers in English, snake_case for functions/variables, CamelCase for types
 - Error messages follow the format: `error: <message>` (lowercase, no period)
-- Exit codes: 0=success, 1=privilege, 2=BPF, 3=args, 4=fatal (see REQUIREMENTS.md §9)
+- Exit codes: 0=success, 1=privilege, 2=BPF, 3=args, 4=fatal (see netoproc-requirements.md §9)
 - No `unwrap()` or `expect()` in non-test code — use `?` operator with `NetopError`
 - `unsafe` blocks only in FFI boundary code (src/bpf/, src/system/) — never in model/output/tui
 - All `#[repr(C)]` structs must have compile-time size assertions
@@ -68,7 +69,7 @@ Three-thread streaming model (v0.2.0):
   - Monitor mode: bridge thread builds `SystemNetworkState` for TUI; TUI runs in main thread
 
 Key modules: `bpf/`, `system/`, `model/`, `state/`, `output/`, `tui/`
-See DESIGN.md §2 for full module map.
+See netoproc-design.md §2 for full module map.
 
 ## Testing
 
@@ -89,7 +90,7 @@ just lint           # full lint pass (check + clippy + fmt)
 clap, ratatui, crossterm, serde, serde_json, arc-swap, crossbeam-channel, libc, thiserror, log, env_logger, rustc-hash
 
 **Not used** (by design): libpcap, tokio, bindgen, nix, hickory-dns
-See DESIGN.md §9 for rationale.
+See netoproc-design.md §9 for rationale.
 
 ## Common Workflows
 
@@ -102,10 +103,10 @@ See DESIGN.md §9 for rationale.
 
 ### Modifying data model
 1. Edit structs in `src/model/mod.rs`
-2. Update TSV serializer in `src/output/tsv.rs` (column order must match REQUIREMENTS.md FR-5.5)
+2. Update TSV serializer in `src/output/tsv.rs` (column order must match netoproc-requirements.md FR-5.5)
 3. Update JSON serializer in `src/output/json.rs`
 4. Run `just test` to catch any serialization mismatches
-5. If field names changed, update REQUIREMENTS.md §7 as the single source of truth
+5. If field names changed, update netoproc-requirements.md §7 as the single source of truth
 
 ### Running the application
 ```

@@ -7,137 +7,107 @@
 
 ## Overview
 
-netoproc is a terminal-based network monitoring tool for macOS that shows per-process, per-socket, per-connection network traffic in real time. It captures packet headers via BPF (Berkeley Packet Filter) and correlates them with process and socket information from macOS system APIs.
+netoproc is a terminal-based network monitoring tool that shows per-process network traffic in real time. It captures packet headers via BPF (Berkeley Packet Filter) and attributes them to processes through socket-level correlation with macOS system APIs.
 
-Unlike `nettop` (Apple's built-in), netoproc provides per-connection traffic rates, a dedicated DNS observatory, a pipe-friendly snapshot mode for scripting, and htop-style keyboard navigation.
-
-## Prerequisites
-
-- macOS 26.0 (Tahoe) or higher
-- [Rust](https://www.rust-lang.org/tools/install) stable toolchain (edition 2024)
-- Root privileges (`sudo`) for BPF device access
-
-Install Rust via rustup:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
+> **Platform notice**: netoproc has only been tested and verified on **macOS 26.0 (Tahoe)** with Apple Silicon. Other macOS versions may work but are not guaranteed.
 
 ## Installation
 
-### Build from source
+### From source (recommended)
 
 ```bash
 git clone https://github.com/XuanLee-HEALER/netoproc.git
 cd netoproc
+just install
+```
+
+### Manual build
+
+```bash
 cargo build --release
 sudo ./target/release/netoproc
 ```
 
-### From crates.io (once published)
+### Prerequisites
 
-```bash
-cargo install netoproc
-```
+- macOS 26.0+ (see [Platform Status](#platform-status) below)
+- [Rust](https://www.rust-lang.org/tools/install) stable toolchain
+- [just](https://github.com/casey/just) task runner (optional but recommended)
+- Root privileges (`sudo`) for BPF device access
 
 ## Usage
 
-netoproc requires root privileges. Always run with `sudo`:
+netoproc requires root privileges for BPF device access:
 
 ```bash
 # Interactive TUI (default)
 sudo netoproc
 
-# Snapshot mode (TSV output)
-sudo netoproc snapshot
+# Snapshot mode — collect for 5 seconds, output TSV
+sudo netoproc --duration 5
 
-# Snapshot in JSON
-sudo netoproc snapshot --format json
+# Snapshot in JSON format
+sudo netoproc --duration 5 --format json
+
+# Human-readable pretty output
+sudo netoproc --duration 5 --format pretty
 
 # Monitor a specific interface
-sudo netoproc monitor --interface en0
+sudo netoproc --interface en0
 
 # Filter by process name
-sudo netoproc monitor --filter firefox
-
-# Fast refresh (500ms)
-sudo netoproc monitor --interval 0.5
+sudo netoproc --filter firefox
 ```
 
-See [docs/USAGE.md](docs/USAGE.md) for the complete user guide with all options, views, keyboard shortcuts, output formats, and examples.
+See [docs/netoproc-usage.md](docs/netoproc-usage.md) for the complete user guide.
 
 ## Features
 
-- **Four TUI views**: Process, Connection, Interface, DNS
-- **Per-connection metrics**: RX/TX rates, RTT, jitter, retransmissions
-- **DNS observatory**: Live query log, resolver latency stats
-- **Snapshot mode**: TSV and JSON output for scripting and piping
-- **Sparkline charts**: Visual traffic trends in the terminal
-- **Keyboard navigation**: htop-style filtering, sorting, row expansion
+- **Per-process traffic**: Attributes network traffic to processes via BPF + socket correlation
+- **TUI monitor mode**: Interactive terminal UI with process, connection, interface, and DNS views
+- **Snapshot mode**: TSV, JSON, and pretty output for scripting and piping
+- **DNS observatory**: Live DNS query log with resolver information
+- **Keyboard navigation**: htop-style filtering, sorting, and row selection
 
 ## Architecture
 
-Three-thread model:
+Streaming three-thread model:
 
-- **BPF capture thread**: Reads raw packets from `/dev/bpfN` via Berkeley Packet Filter
-- **Stats poller thread**: Correlates packets with processes/sockets, publishes state via `ArcSwap`
-- **TUI/snapshot thread**: Renders the interactive display or serializes output
+- **BPF capture threads**: Blocking read on `/dev/bpfN`, batch packets via `sync_channel`
+- **Process refresh thread**: Rebuilds process-to-socket table every 500ms via `ArcSwap`
+- **Main thread**: Drains packets, attributes to processes, accumulates per-process traffic stats
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture documentation.
+See [docs/netoproc-design.md](docs/netoproc-design.md) for the full architecture documentation.
 
-## Development Setup
+## Platform Status
 
-```bash
-git clone https://github.com/XuanLee-HEALER/netoproc.git
-cd netoproc
+| Platform | Status | Notes |
+|----------|--------|-------|
+| macOS 26.0+ (Apple Silicon) | **Verified** | Primary development platform |
+| macOS 26.0+ (Intel) | Untested | Should work (same BPF APIs) |
+| macOS < 26.0 | Untested | May work with older system API differences |
+| Linux | Not supported | Planned |
+| Windows | Not supported | Planned |
 
-# Check compilation
-just check
+## Roadmap
 
-# Build (debug mode)
-just build
+Priorities for future development:
 
-# Run unit tests (no sudo needed)
-just test
+1. **Cross-platform support** — Linux compatibility (via `AF_PACKET` / eBPF) and Windows support as the top priority
+2. **Privilege model** — Reduce the need for full root access; explore capabilities-based approaches on Linux, BPF device group permissions on macOS
+3. **UI improvements** — Richer TUI views, per-connection sparklines, configurable layouts, and theme support
 
-# Run all tests including integration (requires sudo)
-just test-all
-```
-
-## Running Tests
-
-```bash
-# Unit tests only
-just test
-
-# All tests (requires sudo)
-just test-all
-
-# Specific test
-cargo test test_name
-
-# Lint check
-just clippy
-
-# Full lint pass (check + clippy + fmt)
-just lint
-```
-
-## Linting & Formatting
+## Development
 
 ```bash
-# Format code
-just fmt
-
-# Format check (CI)
-just fmt-check
-
-# Lint with Clippy
-just clippy
-
-# Combined lint (check + clippy + fmt-check)
-just lint
+just build       # debug build
+just test        # unit tests (no sudo)
+just test-all    # all tests (requires sudo)
+just lint        # check + clippy + fmt-check
+just install     # cargo install to ~/.cargo/bin
 ```
+
+Run `just --list` to see all available recipes.
 
 ## Contributing
 

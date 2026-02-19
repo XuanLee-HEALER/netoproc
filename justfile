@@ -55,6 +55,10 @@ run *args:
 run-snapshot *args:
     sudo cargo run -- --duration 5 {{args}}
 
+# Install netoproc to ~/.cargo/bin
+install:
+    cargo install --path .
+
 # Generate and open documentation
 doc:
     cargo doc --no-deps --open

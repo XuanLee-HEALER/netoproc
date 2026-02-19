@@ -33,7 +33,7 @@ We follow [Conventional Commits](https://www.conventionalcommits.org/):
 ```
 feat: add IPv6 jumbogram support
 fix: correct BPF filter jump offset for UDP
-docs: update USAGE.md with new --no-dns flag
+docs: update netoproc-usage.md with new --no-dns flag
 refactor: extract packet parsing into BpfPacketIter
 test: add IPv6 extension header chaining tests
 chore: upgrade clap to v4.5
@@ -75,4 +75,4 @@ src/
 └── main.rs    # Entry point, thread orchestration
 ```
 
-See [docs/DESIGN.md](docs/DESIGN.md) for architecture details.
+See [docs/netoproc-design.md](docs/netoproc-design.md) for architecture details.

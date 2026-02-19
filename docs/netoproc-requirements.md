@@ -1,4 +1,4 @@
-# REQUIREMENTS.md — netop Network Traffic Monitor
+# netoproc-requirements.md — netoproc Network Traffic Monitor
 
 ## 1. Overview
 

@@ -1,4 +1,4 @@
-# DESIGN.md — netop Architecture and Design
+# netoproc-design.md — netoproc Architecture and Design
 
 ## 1. Architecture Overview
 
@@ -118,7 +118,7 @@ to TUI event loop or snapshot serializer. Handles clean shutdown (join threads,
 restore terminal).
 
 **cli.rs**: Uses `clap` derive macros. Defines `Cli` struct with all flags per
-REQUIREMENTS.md Section 6. Validates ranges (interval 0.1-10.0, bpf-buffer
+netoproc-requirements.md Section 6. Validates ranges (interval 0.1-10.0, bpf-buffer
 4096-1048576). No business logic.
 
 **privilege.rs**: `check_root()` — calls `libc::getuid()`, returns error if
@@ -186,7 +186,7 @@ structures. Similarly `list_udp_connections()` for UDP.
 SystemConfiguration `SCDynamicStore` API to query per-service DNS configuration.
 Maps service IDs to interface names.
 
-**model/mod.rs**: All data model structs from REQUIREMENTS.md Section 7. Derives
+**model/mod.rs**: All data model structs from netoproc-requirements.md Section 7. Derives
 `Clone`, `serde::Serialize` (for JSON output). No business logic.
 
 **model/timeseries.rs**: `RingBuffer<const N: usize>` — fixed-size circular
@@ -213,7 +213,7 @@ new samples, removes stale entries, adds new entries.
 **output/tsv.rs**: `write_tsv(state: &SystemNetworkState, writer: &mut impl
 Write) -> Result<()>`. Writes each section with `#` header comment, column
 headers, and tab-separated data rows. Column order exactly as specified in
-REQUIREMENTS.md FR-5.5.
+netoproc-requirements.md FR-5.5.
 
 **output/json.rs**: `write_json(state: &SystemNetworkState, writer: &mut impl
 Write) -> Result<()>`. Uses `serde_json::to_writer_pretty`. Field names match
@@ -656,7 +656,7 @@ a Rust wrapper that implements `Drop`.
 ### 6.1 Rust Struct Definitions
 
 All structs derive `Clone` and `serde::Serialize`. Field names use snake_case
-exactly as specified in REQUIREMENTS.md Section 7.
+exactly as specified in netoproc-requirements.md Section 7.
 
 ```rust
 #[derive(Clone, Serialize)]
@@ -913,7 +913,7 @@ Callers never deal with raw pointers or C types.
 ### 8.2 Error Propagation
 
 - `main.rs`: catches all `NetopError` variants, maps to exit codes per
-  REQUIREMENTS.md Section 9.
+  netoproc-requirements.md Section 9.
 - BPF capture thread: catches transient errors in loop, only propagates fatal.
 - Stats poller: catches per-process errors, skips failed processes.
 - TUI thread: catches render errors, attempts to restore terminal before exit.

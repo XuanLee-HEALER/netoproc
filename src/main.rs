@@ -44,7 +44,7 @@ fn install_signal_handlers() {
     }
 }
 
-/// Exit codes per REQUIREMENTS.md §9
+/// Exit codes per netoproc-requirements.md §9
 fn exit_code(err: &NetopError) -> i32 {
     match err {
         NetopError::NotRoot => 1,
