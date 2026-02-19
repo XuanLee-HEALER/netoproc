@@ -41,7 +41,6 @@ const BPF_LDX: u16 = 0x01;
 const BPF_ST: u16 = 0x02;
 #[allow(dead_code)]
 const BPF_STX: u16 = 0x03;
-#[allow(dead_code)]
 const BPF_ALU: u16 = 0x04;
 const BPF_JMP: u16 = 0x05;
 const BPF_RET: u16 = 0x06;
@@ -49,7 +48,6 @@ const BPF_RET: u16 = 0x06;
 const BPF_MISC: u16 = 0x07;
 
 // LD/LDX sizes
-#[allow(dead_code)]
 const BPF_W: u16 = 0x00; // word (32-bit)
 const BPF_H: u16 = 0x08; // half-word (16-bit)
 const BPF_B: u16 = 0x10; // byte
@@ -70,6 +68,9 @@ const BPF_JEQ: u16 = 0x10; // jump if A == k
 #[allow(dead_code)]
 const BPF_JGT: u16 = 0x20; // jump if A > k
 const BPF_JSET: u16 = 0x40; // jump if A & k != 0
+
+// ALU operations
+const BPF_AND_OP: u16 = 0x50; // bitwise AND
 
 // Operand source
 const BPF_K: u16 = 0x00; // constant operand
@@ -216,6 +217,212 @@ pub fn dns_filter() -> Vec<bpf_insn> {
         //     jt = 0 (jump to [12] accept), jf = 1 (jump to [13] drop)
         insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 53),
         // [12] Accept — capture up to 512 bytes
+        insn(BPF_RET | BPF_K, 0, 0, 512),
+        // [13] Drop
+        insn(BPF_RET | BPF_K, 0, 0, 0),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// DLT_RAW filters (for utun / tunnel interfaces — no link-layer header)
+// ---------------------------------------------------------------------------
+
+/// Build a BPF program for DLT_RAW interfaces (e.g. macOS `utun*`).
+///
+/// DLT_RAW has no link-layer header — the IP packet starts at offset 0.
+/// IPv4/IPv6 is determined by the version nibble in the first byte.
+///
+/// Equivalent pseudo-assembly:
+/// ```text
+///   [0]  ldb  [0]                ; version + IHL byte
+///   [1]  and  #0xF0              ; mask to version nibble
+///   [2]  jeq  #0x40  jt=0 jf=3  ; IPv4 → [3], else → [6]
+///   [3]  ldb  [9]                ; IPv4 protocol (offset 9)
+///   [4]  jeq  #6      jt=5 jf=0 ; TCP → [10] accept
+///   [5]  jeq  #17     jt=4 jf=5 ; UDP → [10] accept, else drop
+///   [6]  jeq  #0x60   jt=0 jf=4 ; IPv6 → [7], else → [11] drop
+///   [7]  ldb  [6]                ; IPv6 Next Header (offset 6)
+///   [8]  jeq  #6      jt=1 jf=0 ; TCP → [10] accept
+///   [9]  jeq  #17     jt=0 jf=1 ; UDP → [10] accept, else drop
+///   [10] ret  #65535             ; accept
+///   [11] ret  #0                 ; drop
+/// ```
+pub fn traffic_filter_raw() -> Vec<bpf_insn> {
+    vec![
+        // [0] Load first byte (contains IP version in upper nibble)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 0),
+        // [1] Mask to version nibble: 0x40 = IPv4, 0x60 = IPv6
+        insn(BPF_ALU | BPF_AND_OP | BPF_K, 0, 0, 0xF0),
+        // [2] IPv4? fall through to [3]; else jump +3 to [6]
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 3, 0x40),
+        // [3] Load IPv4 protocol byte (offset 9, no Ethernet header)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 9),
+        // [4] TCP(6)? jump +5 to [10] accept; else fall to [5]
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 5, 0, 6),
+        // [5] UDP(17)? jump +4 to [10] accept; else jump +5 to [11] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 4, 5, 17),
+        // [6] IPv6 (0x60)? fall through to [7]; else jump +4 to [11] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, 0x60),
+        // [7] Load IPv6 Next Header (offset 6, no Ethernet header)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 6),
+        // [8] TCP(6)? jump +1 to [10] accept; else fall to [9]
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 6),
+        // [9] UDP(17)? jump +0 to [10] accept; else jump +1 to [11] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 17),
+        // [10] Accept — return snaplen
+        insn(BPF_RET | BPF_K, 0, 0, 65535),
+        // [11] Drop — return 0
+        insn(BPF_RET | BPF_K, 0, 0, 0),
+    ]
+}
+
+/// Build a DNS-specific BPF program for DLT_RAW interfaces.
+///
+/// Same logic as [`dns_filter`] but with offsets adjusted for the absence
+/// of a 14-byte Ethernet header.
+///
+/// Equivalent pseudo-assembly:
+/// ```text
+///   [0]  ldb  [0]                       ; version byte
+///   [1]  and  #0xF0                     ; mask version
+///   [2]  jeq  #0x40, +0, drop           ; IPv4? else drop
+///   [3]  ldb  [9]                       ; IP protocol
+///   [4]  jeq  #17, udp_frag, +0         ; UDP?
+///   [5]  jeq  #6, ports, drop           ; TCP? else drop
+///   [6]  ldh  [6]                       ; IP flags + frag offset
+///   [7]  jset #0x1FFF, drop, +0         ; fragment? drop
+///   [8]  ldx  4*([0]&0xf)               ; X = IP header length
+///   [9]  ldh  [x+0]                     ; src port
+///   [10] jeq  #53, accept, +0           ; DNS src?
+///   [11] ldh  [x+2]                     ; dst port
+///   [12] jeq  #53, accept, drop         ; DNS dst?
+///   [13] ret  #512                      ; accept
+///   [14] ret  #0                        ; drop
+/// ```
+pub fn dns_filter_raw() -> Vec<bpf_insn> {
+    vec![
+        // [0] Load first byte (version + IHL)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 0),
+        // [1] Mask to version nibble
+        insn(BPF_ALU | BPF_AND_OP | BPF_K, 0, 0, 0xF0),
+        // [2] IPv4 (0x40)? continue; else jump to [14] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 11, 0x40),
+        // [3] Load IP protocol (offset 9)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 9),
+        // [4] UDP(17)? jump to [6] frag check; else check TCP
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 17),
+        // [5] TCP(6)? jump to [8] port check; else jump to [14] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 2, 8, 6),
+        // [6] Load IP flags + fragment offset (offset 6)
+        insn(BPF_LD | BPF_H | BPF_ABS, 0, 0, 6),
+        // [7] Fragment offset set? jump to [14] drop; else continue
+        insn(BPF_JMP | BPF_JSET | BPF_K, 6, 0, 0x1FFF),
+        // [8] Load IP header length: X = 4 * (packet[0] & 0x0f)
+        insn(BPF_LDX | BPF_B | BPF_MSH, 0, 0, 0),
+        // [9] Load source port: half-word at [X + 0]
+        insn(BPF_LD | BPF_H | BPF_IND, 0, 0, 0),
+        // [10] src port == 53? accept; else check dst
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 53),
+        // [11] Load destination port: half-word at [X + 2]
+        insn(BPF_LD | BPF_H | BPF_IND, 0, 0, 2),
+        // [12] dst port == 53? accept; else drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 53),
+        // [13] Accept — capture up to 512 bytes
+        insn(BPF_RET | BPF_K, 0, 0, 512),
+        // [14] Drop
+        insn(BPF_RET | BPF_K, 0, 0, 0),
+    ]
+}
+
+// ---------------------------------------------------------------------------
+// DLT_NULL filters (for loopback — 4-byte AF header in host byte order)
+// ---------------------------------------------------------------------------
+
+// DLT_NULL stores the address family as a 32-bit integer in host byte order.
+// BPF LD_W reads 4 bytes and interprets them as big-endian.
+// On little-endian macOS (ARM64/x86_64): AF_INET (2) → BPF sees 0x0200_0000.
+#[cfg(not(target_endian = "little"))]
+compile_error!("DLT_NULL BPF filter values assume little-endian host byte order");
+const AF_INET_BPF: u32 = 0x0200_0000; // AF_INET (2) as seen by BPF LD_W on LE
+const AF_INET6_BPF: u32 = 0x1E00_0000; // AF_INET6 (30) as seen by BPF LD_W on LE
+
+/// Build a BPF program for DLT_NULL interfaces (e.g. macOS `lo0`).
+///
+/// DLT_NULL has a 4-byte header containing the address family in host byte
+/// order. The IP packet starts at offset 4.
+///
+/// Equivalent pseudo-assembly:
+/// ```text
+///   [0]  ldw  [0]                        ; AF family (4 bytes, host order)
+///   [1]  jeq  #AF_INET_BPF   jt=0 jf=3  ; IPv4 → [2], else → [5]
+///   [2]  ldb  [13]                       ; IPv4 protocol (4+9=13)
+///   [3]  jeq  #6      jt=5 jf=0         ; TCP → [9] accept
+///   [4]  jeq  #17     jt=4 jf=5         ; UDP → [9] accept, else drop
+///   [5]  jeq  #AF_INET6_BPF  jt=0 jf=4  ; IPv6 → [6], else → [10] drop
+///   [6]  ldb  [10]                       ; IPv6 Next Header (4+6=10)
+///   [7]  jeq  #6      jt=1 jf=0         ; TCP → [9] accept
+///   [8]  jeq  #17     jt=0 jf=1         ; UDP → [9] accept, else drop
+///   [9]  ret  #65535                     ; accept
+///   [10] ret  #0                         ; drop
+/// ```
+pub fn traffic_filter_null() -> Vec<bpf_insn> {
+    vec![
+        // [0] Load 4-byte AF family header
+        insn(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0),
+        // [1] AF_INET? fall through to [2]; else jump +3 to [5]
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 3, AF_INET_BPF),
+        // [2] Load IPv4 protocol byte (offset 4+9=13)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 13),
+        // [3] TCP(6)? jump +5 to [9] accept
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 5, 0, 6),
+        // [4] UDP(17)? jump +4 to [9] accept; else jump +5 to [10] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 4, 5, 17),
+        // [5] AF_INET6? fall through to [6]; else jump +4 to [10] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 4, AF_INET6_BPF),
+        // [6] Load IPv6 Next Header (offset 4+6=10)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 10),
+        // [7] TCP(6)? jump +1 to [9] accept
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 6),
+        // [8] UDP(17)? jump +0 to [9] accept; else jump +1 to [10] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 17),
+        // [9] Accept
+        insn(BPF_RET | BPF_K, 0, 0, 65535),
+        // [10] Drop
+        insn(BPF_RET | BPF_K, 0, 0, 0),
+    ]
+}
+
+/// Build a DNS-specific BPF program for DLT_NULL interfaces.
+///
+/// Same logic as [`dns_filter`] but with a 4-byte NULL header offset instead
+/// of 14-byte Ethernet.
+pub fn dns_filter_null() -> Vec<bpf_insn> {
+    vec![
+        // [0] Load AF family
+        insn(BPF_LD | BPF_W | BPF_ABS, 0, 0, 0),
+        // [1] AF_INET? continue; else jump to [13] drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 11, AF_INET_BPF),
+        // [2] Load IP protocol (offset 4+9=13)
+        insn(BPF_LD | BPF_B | BPF_ABS, 0, 0, 13),
+        // [3] UDP(17)? jump to [5] frag check
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 1, 0, 17),
+        // [4] TCP(6)? jump to [7] port check; else drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 2, 8, 6),
+        // [5] Load IP flags+frag (offset 4+6=10)
+        insn(BPF_LD | BPF_H | BPF_ABS, 0, 0, 10),
+        // [6] Fragment? drop
+        insn(BPF_JMP | BPF_JSET | BPF_K, 6, 0, 0x1FFF),
+        // [7] X = IP header length from byte at offset 4
+        insn(BPF_LDX | BPF_B | BPF_MSH, 0, 0, 4),
+        // [8] src port at [X + 4]
+        insn(BPF_LD | BPF_H | BPF_IND, 0, 0, 4),
+        // [9] src == 53? accept
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 53),
+        // [10] dst port at [X + 6]
+        insn(BPF_LD | BPF_H | BPF_IND, 0, 0, 6),
+        // [11] dst == 53? accept; else drop
+        insn(BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 53),
+        // [12] Accept
         insn(BPF_RET | BPF_K, 0, 0, 512),
         // [13] Drop
         insn(BPF_RET | BPF_K, 0, 0, 0),
@@ -550,7 +757,7 @@ mod tests {
         hdr.extend_from_slice(&dst);
         // Options (zero-padded to fill IHL * 4 - 20 bytes)
         let options_len = hdr_len - 20;
-        hdr.extend(std::iter::repeat(0u8).take(options_len));
+        hdr.extend(std::iter::repeat_n(0u8, options_len));
         // Payload
         hdr.extend_from_slice(payload);
         hdr
@@ -918,5 +1125,241 @@ mod tests {
         assert_eq!(i.jt, 5);
         assert_eq!(i.jf, 6);
         assert_eq!(i.k, 0x789ABCDE);
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_RAW packet construction helpers
+    // -------------------------------------------------------------------
+
+    /// Build a DLT_RAW IPv4 TCP packet (no link-layer header).
+    fn build_raw_ipv4_tcp_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let tcp = build_tcp(src_port, dst_port);
+        build_ipv4(6, src_ip, dst_ip, &tcp)
+    }
+
+    /// Build a DLT_RAW IPv4 UDP packet (no link-layer header).
+    fn build_raw_ipv4_udp_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let udp = build_udp(src_port, dst_port, &[]);
+        build_ipv4(17, src_ip, dst_ip, &udp)
+    }
+
+    /// Build a DLT_RAW IPv6 TCP packet (no link-layer header).
+    fn build_raw_ipv6_tcp_packet() -> Vec<u8> {
+        let tcp = build_tcp(12345, 443);
+        let payload_len = tcp.len() as u16;
+        let mut ipv6 = Vec::with_capacity(40 + tcp.len());
+        ipv6.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        ipv6.extend_from_slice(&payload_len.to_be_bytes());
+        ipv6.push(6); // Next header: TCP
+        ipv6.push(64);
+        ipv6.extend_from_slice(&[0; 15]);
+        ipv6.push(1);
+        ipv6.extend_from_slice(&[0; 15]);
+        ipv6.push(2);
+        ipv6.extend_from_slice(&tcp);
+        ipv6
+    }
+
+    /// Build a DLT_RAW IPv6 UDP packet (no link-layer header).
+    fn build_raw_ipv6_udp_packet() -> Vec<u8> {
+        let udp = build_udp(5353, 5353, &[]);
+        let payload_len = udp.len() as u16;
+        let mut ipv6 = Vec::with_capacity(40 + udp.len());
+        ipv6.extend_from_slice(&[0x60, 0x00, 0x00, 0x00]);
+        ipv6.extend_from_slice(&payload_len.to_be_bytes());
+        ipv6.push(17); // Next header: UDP
+        ipv6.push(64);
+        ipv6.extend_from_slice(&[0; 15]);
+        ipv6.push(1);
+        ipv6.extend_from_slice(&[0; 15]);
+        ipv6.push(2);
+        ipv6.extend_from_slice(&udp);
+        ipv6
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_NULL packet construction helpers
+    // -------------------------------------------------------------------
+
+    /// Build a DLT_NULL header (4-byte AF family in LE host byte order).
+    fn build_null_header(af: u32) -> Vec<u8> {
+        af.to_ne_bytes().to_vec()
+    }
+
+    /// Build a DLT_NULL IPv4 TCP packet.
+    fn build_null_ipv4_tcp_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let tcp = build_tcp(src_port, dst_port);
+        let ip = build_ipv4(6, src_ip, dst_ip, &tcp);
+        let mut pkt = build_null_header(libc::AF_INET as u32);
+        pkt.extend_from_slice(&ip);
+        pkt
+    }
+
+    /// Build a DLT_NULL IPv4 UDP packet.
+    fn build_null_ipv4_udp_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let udp = build_udp(src_port, dst_port, &[]);
+        let ip = build_ipv4(17, src_ip, dst_ip, &udp);
+        let mut pkt = build_null_header(libc::AF_INET as u32);
+        pkt.extend_from_slice(&ip);
+        pkt
+    }
+
+    /// Build a DLT_NULL IPv6 TCP packet.
+    fn build_null_ipv6_tcp_packet() -> Vec<u8> {
+        let raw_ipv6 = build_raw_ipv6_tcp_packet();
+        let mut pkt = build_null_header(libc::AF_INET6 as u32);
+        pkt.extend_from_slice(&raw_ipv6);
+        pkt
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_RAW traffic filter tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ut_traffic_filter_raw_accepts_ipv4_tcp() {
+        let filter = traffic_filter_raw();
+        let pkt = build_raw_ipv4_tcp_packet([192, 168, 1, 1], [93, 184, 216, 34], 54321, 443);
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_raw_accepts_ipv4_udp() {
+        let filter = traffic_filter_raw();
+        let pkt = build_raw_ipv4_udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 12345, 80);
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_raw_accepts_ipv6_tcp() {
+        let filter = traffic_filter_raw();
+        let pkt = build_raw_ipv6_tcp_packet();
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_raw_accepts_ipv6_udp() {
+        let filter = traffic_filter_raw();
+        let pkt = build_raw_ipv6_udp_packet();
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_raw_rejects_icmp() {
+        let filter = traffic_filter_raw();
+        let icmp_payload = vec![0u8; 8];
+        let pkt = build_ipv4(1, [10, 0, 0, 1], [10, 0, 0, 2], &icmp_payload);
+        assert_eq!(execute_filter(&filter, &pkt), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_RAW DNS filter tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ut_dns_filter_raw_accepts_udp_dst_53() {
+        let filter = dns_filter_raw();
+        let pkt = build_raw_ipv4_udp_packet([10, 0, 0, 1], [8, 8, 8, 8], 51234, 53);
+        assert_eq!(execute_filter(&filter, &pkt), 512);
+    }
+
+    #[test]
+    fn ut_dns_filter_raw_accepts_udp_src_53() {
+        let filter = dns_filter_raw();
+        let pkt = build_raw_ipv4_udp_packet([8, 8, 8, 8], [10, 0, 0, 1], 53, 51234);
+        assert_eq!(execute_filter(&filter, &pkt), 512);
+    }
+
+    #[test]
+    fn ut_dns_filter_raw_accepts_tcp_dst_53() {
+        let filter = dns_filter_raw();
+        let pkt = build_raw_ipv4_tcp_packet([10, 0, 0, 1], [8, 8, 8, 8], 51234, 53);
+        assert_eq!(execute_filter(&filter, &pkt), 512);
+    }
+
+    #[test]
+    fn ut_dns_filter_raw_rejects_port_80() {
+        let filter = dns_filter_raw();
+        let pkt = build_raw_ipv4_udp_packet([10, 0, 0, 1], [93, 184, 216, 34], 54321, 80);
+        assert_eq!(execute_filter(&filter, &pkt), 0);
+    }
+
+    #[test]
+    fn ut_dns_filter_raw_rejects_ipv6() {
+        let filter = dns_filter_raw();
+        let pkt = build_raw_ipv6_tcp_packet();
+        assert_eq!(execute_filter(&filter, &pkt), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_NULL traffic filter tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ut_traffic_filter_null_accepts_ipv4_tcp() {
+        let filter = traffic_filter_null();
+        let pkt = build_null_ipv4_tcp_packet([192, 168, 1, 1], [93, 184, 216, 34], 54321, 443);
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_null_accepts_ipv4_udp() {
+        let filter = traffic_filter_null();
+        let pkt = build_null_ipv4_udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 12345, 80);
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_null_accepts_ipv6_tcp() {
+        let filter = traffic_filter_null();
+        let pkt = build_null_ipv6_tcp_packet();
+        assert_eq!(execute_filter(&filter, &pkt), 65535);
+    }
+
+    #[test]
+    fn ut_traffic_filter_null_rejects_unknown_af() {
+        let filter = traffic_filter_null();
+        // AF_UNSPEC (0) — should be rejected
+        let mut pkt = build_null_header(0);
+        pkt.extend_from_slice(&[0u8; 40]);
+        assert_eq!(execute_filter(&filter, &pkt), 0);
+    }
+
+    // -------------------------------------------------------------------
+    // DLT_NULL DNS filter tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn ut_dns_filter_null_accepts_udp_dst_53() {
+        let filter = dns_filter_null();
+        let pkt = build_null_ipv4_udp_packet([10, 0, 0, 1], [8, 8, 8, 8], 51234, 53);
+        assert_eq!(execute_filter(&filter, &pkt), 512);
+    }
+
+    #[test]
+    fn ut_dns_filter_null_rejects_port_80() {
+        let filter = dns_filter_null();
+        let pkt = build_null_ipv4_udp_packet([10, 0, 0, 1], [10, 0, 0, 2], 54321, 80);
+        assert_eq!(execute_filter(&filter, &pkt), 0);
     }
 }

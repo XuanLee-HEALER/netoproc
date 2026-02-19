@@ -1,9 +1,7 @@
 pub mod correlation;
-pub mod timeseries;
+pub mod traffic;
 
 use serde::Serialize;
-
-use self::timeseries::AggregatedTimeSeries;
 
 #[derive(Clone, Serialize)]
 pub struct SystemNetworkState {
@@ -139,10 +137,6 @@ pub struct Interface {
     pub tx_packets: u64,
     pub rx_errors: u64,
     pub tx_errors: u64,
-    #[serde(skip)]
-    pub rx_timeseries: AggregatedTimeSeries,
-    #[serde(skip)]
-    pub tx_timeseries: AggregatedTimeSeries,
 }
 
 impl Default for Interface {
@@ -162,8 +156,6 @@ impl Default for Interface {
             tx_packets: 0,
             rx_errors: 0,
             tx_errors: 0,
-            rx_timeseries: AggregatedTimeSeries::new(),
-            tx_timeseries: AggregatedTimeSeries::new(),
         }
     }
 }
@@ -197,10 +189,6 @@ pub struct Connection {
     pub rx_bytes_total: u64,
     pub tx_bytes_total: u64,
     pub stability: Option<ConnectionStability>,
-    #[serde(skip)]
-    pub rx_timeseries: AggregatedTimeSeries,
-    #[serde(skip)]
-    pub tx_timeseries: AggregatedTimeSeries,
 }
 
 #[derive(Clone, Serialize, Default)]

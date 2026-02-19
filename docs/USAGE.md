@@ -7,7 +7,7 @@ netop — real-time per-process network traffic monitor for macOS
 ## SYNOPSIS
 
 ```
-sudo netop [OPTIONS] [COMMAND]
+sudo netoproc [OPTIONS]
 ```
 
 ## DESCRIPTION
@@ -35,31 +35,32 @@ Unlike `netstat`, netop shows **live traffic rates**, not just connection state.
 Unlike `tcpdump`/Wireshark, netop focuses on **who is sending traffic**, not
 the packet contents.
 
-## COMMANDS
+## MODES
 
-### `monitor` (default)
+### Monitor (default)
 
-Launch the interactive full-screen TUI. This is the default when no command
-is specified.
+Launch the interactive full-screen TUI. This is the default behavior when
+`--duration` is not specified.
 
 ```
-sudo netop
-sudo netop monitor
-sudo netop monitor --interval 0.5
+sudo netoproc
+sudo netoproc --monitor
 ```
 
 The TUI provides four views (Process, Connection, Interface, DNS) that can
 be switched with keyboard shortcuts. See **TUI CONTROLS** below.
 
-### `snapshot`
+### Snapshot
 
-Capture the current network state and print it to stdout, then exit. Designed
-for scripting, logging, and piping to other Unix tools.
+Capture per-process traffic data for a specified duration and print it to
+stdout, then exit. Triggered by the `--duration` flag. Designed for scripting,
+logging, and piping to other Unix tools.
 
 ```
-sudo netop snapshot
-sudo netop snapshot --format json
-sudo netop snapshot --format tsv | column -t -s $'\t'
+sudo netoproc --duration 5
+sudo netoproc --duration 5 --format json
+sudo netoproc --duration 5 --format pretty
+sudo netoproc --duration 10 --format tsv | column -t -s $'\t'
 ```
 
 Output contains no ANSI escape codes, no progress indicators, and no
@@ -69,17 +70,19 @@ text processing tools.
 ## OPTIONS
 
 ```
+--duration <SECONDS>
+    Snapshot mode: collect per-process traffic for the specified
+    duration, then output and exit.
+    Without this flag, monitor (TUI) mode runs by default.
+    Range: 1.0 to 3600.0
+
+--monitor
+    Explicitly enter monitor (TUI) mode. This is the default behavior.
+
 --format <FORMAT>
     Output format for snapshot mode.
-    Values: tsv (default), json
+    Values: tsv (default), json, pretty
     Ignored in monitor mode.
-
---interval <SECONDS>
-    Polling and refresh interval in seconds.
-    Default: 1.0
-    Range: 0.1 to 10.0
-    Lower values give more responsive updates but increase CPU usage.
-    In snapshot mode, this controls the data collection window.
 
 --filter <PATTERN>
     Filter by pattern. Matches against process name, remote address,
@@ -110,8 +113,8 @@ text processing tools.
 
 --bpf-buffer <BYTES>
     BPF kernel buffer size in bytes.
-    Default: 32768 (32 KB)
-    Range: 4096 (4 KB) to 1048576 (1 MB)
+    Default: 2097152 (2 MB)
+    Range: 4096 (4 KB) to 16777216 (16 MB)
     Increase if you see high packet drop rates on busy networks.
 
 --version
@@ -313,147 +316,77 @@ Split layout with resolver statistics at the top and a live query log at the bot
 
 ### TSV Format (Default)
 
-The TSV output is divided into sections. Each section starts with a comment
-line (prefixed with `#`) naming the section, followed by a tab-separated
-header row, followed by data rows. Sections are separated by blank lines.
+A per-process traffic table with a header row and data rows sorted by total
+traffic (rx_bytes + tx_bytes) descending.
 
 ```
-# processes
-pid	name	user	socket_count	connection_count	rx_bytes_sec	tx_bytes_sec	rx_bytes_total	tx_bytes_total
-1842	firefox	admin	12	8	2150400	348160	134742016	12897280
-2103	curl	admin	1	1	524288	12288	5452595	104448
-
-# sockets
-pid	process	fd	proto	local_addr	state
-1842	firefox	5	TCP	192.168.1.100:54321	ESTABLISHED
-1842	firefox	6	TCP	192.168.1.100:54322	ESTABLISHED
-1842	firefox	8	TCP	*:0	CLOSED
-2103	curl	5	TCP	192.168.1.100:54400	ESTABLISHED
-
-# connections
-pid	process	fd	proto	local_addr	remote_addr	direction	state	interface	rx_bytes_sec	tx_bytes_sec	rx_bytes_total	tx_bytes_total	rtt_us	jitter_us	retransmissions
-1842	firefox	5	TCP	192.168.1.100:54321	140.82.121.4:443	outbound	ESTABLISHED	en0	1258291	204800	67371008	6448640	12000	500	0
-1842	firefox	6	TCP	192.168.1.100:54322	151.101.1.69:443	outbound	ESTABLISHED	en0	819200	143360	53477376	5132288	18000	1200	3
-2103	curl	5	TCP	192.168.1.100:54400	93.184.216.34:443	outbound	ESTABLISHED	en0	524288	12288	5452595	104448	45000	2000	0
-
-# interfaces
-name	ipv4_addr	ipv6_addr	status	rx_bytes_sec	tx_bytes_sec	rx_bytes_total	tx_bytes_total	rx_packets	tx_packets	rx_errors	tx_errors
-en0	192.168.1.100	fe80::1a2b:3c4d:5e6f:7890	up	2150400	348160	1288490189	107374182	1234567	234567	0	0
-lo0	127.0.0.1	::1	up	12288	12288	52428800	52428800	50000	50000	0	0
-
-# dns_resolvers
-interface	server	avg_latency_ms	failure_rate_pct	query_count
-en0	192.168.1.1	12.3	0.5	1234
-en0	8.8.8.8	18.7	0.1	567
-
-# dns_queries
-timestamp_ms	pid	process	query_name	query_type	response	latency_ms	resolver
-1739875201000	1842	firefox	github.com	A	140.82.121.4	12.0	192.168.1.1
-1739875201050	1842	firefox	api.github.com	AAAA	2606:50c0:8003::154	15.0	192.168.1.1
-1739875202000	2103	curl	example.com	A	93.184.216.34	18.0	8.8.8.8
+pid	process	rx_bytes	tx_bytes	rx_packets	tx_packets
+1842	chrome	1200000	340000	800	200
+5678	curl	50000	10000	100	50
+-	unknown	45000	0	30	0
 ```
+
+- Columns are tab-separated
+- Unknown processes show `-` for PID and `unknown` for process name
+- No section headers, no comment lines
 
 **Parsing examples:**
 
 ```bash
-# Extract just process names and their RX rates
-sudo netop snapshot | awk -F'\t' '/^[0-9]/ && section=="processes" {print $2, $6} /^# processes/{section="processes"} /^$/{section=""}'
+# Top 5 processes by total traffic
+sudo netoproc --duration 5 | sort -t$'\t' -k3 -rn | head -5
 
-# Simpler: use JSON format with jq
-sudo netop snapshot --format json | jq '.processes[] | {name, rx_rate: .sockets[].connections[].rx_rate.bytes_per_sec}'
+# Use JSON format with jq
+sudo netoproc --duration 5 --format json | jq '.[0:5] | .[] | {process, rx_bytes, tx_bytes}'
 ```
 
 ### JSON Format
 
-A single JSON object matching the SystemNetworkState data model. All field
-names use snake_case. Arrays may be empty but are always present. Numeric
-values are JSON numbers.
+A JSON array of per-process traffic objects sorted by total traffic descending.
 
 ```json
-{
-  "timestamp": 1739875201000,
-  "interfaces": [
-    {
-      "name": "en0",
-      "ipv4_addresses": ["192.168.1.100"],
-      "ipv6_addresses": ["fe80::1a2b:3c4d:5e6f:7890"],
-      "dns_servers": ["192.168.1.1", "8.8.8.8"],
-      "search_domains": ["local"],
-      "status": "up",
-      "rx_bytes_rate": 2150400.0,
-      "tx_bytes_rate": 348160.0,
-      "rx_bytes_total": 1288490189,
-      "tx_bytes_total": 107374182,
-      "rx_packets": 1234567,
-      "tx_packets": 234567,
-      "rx_errors": 0,
-      "tx_errors": 0
-    }
-  ],
-  "processes": [
-    {
-      "pid": 1842,
-      "name": "firefox",
-      "cmdline": "/Applications/Firefox.app/Contents/MacOS/firefox",
-      "uid": 501,
-      "username": "admin",
-      "sockets": [
-        {
-          "fd": 5,
-          "protocol": "tcp",
-          "local_addr": "192.168.1.100:54321",
-          "state": "established",
-          "connections": [
-            {
-              "remote_addr": "140.82.121.4:443",
-              "direction": "outbound",
-              "interface": "en0",
-              "rx_rate": {
-                "bytes_per_sec": 1258291.0,
-                "bytes_per_min": 75497472.0
-              },
-              "tx_rate": {
-                "bytes_per_sec": 204800.0,
-                "bytes_per_min": 12288000.0
-              },
-              "rx_bytes_total": 67371008,
-              "tx_bytes_total": 6448640,
-              "stability": {
-                "rtt_us": 12000,
-                "jitter_us": 500,
-                "retransmissions": 0,
-                "retransmit_rate": 0.0
-              }
-            }
-          ]
-        }
-      ]
-    }
-  ],
-  "dns": {
-    "resolvers": [
-      {
-        "interface": "en0",
-        "server": "192.168.1.1",
-        "avg_latency_ms": 12.3,
-        "failure_rate_pct": 0.5,
-        "query_count": 1234
-      }
-    ],
-    "queries": [
-      {
-        "timestamp_ms": 1739875201000,
-        "pid": 1842,
-        "process": "firefox",
-        "query_name": "github.com",
-        "query_type": "A",
-        "response": "140.82.121.4",
-        "latency_ms": 12.0,
-        "resolver": "192.168.1.1"
-      }
-    ]
+[
+  {
+    "pid": 1842,
+    "process": "chrome",
+    "rx_bytes": 1200000,
+    "tx_bytes": 340000,
+    "rx_packets": 800,
+    "tx_packets": 200
+  },
+  {
+    "pid": 5678,
+    "process": "curl",
+    "rx_bytes": 50000,
+    "tx_bytes": 10000,
+    "rx_packets": 100,
+    "tx_packets": 50
+  },
+  {
+    "pid": null,
+    "process": "unknown",
+    "rx_bytes": 45000,
+    "tx_bytes": 0,
+    "rx_packets": 30,
+    "tx_packets": 0
   }
-}
+]
+```
+
+### Pretty Format
+
+Human-readable table with formatted byte sizes and a summary line.
+
+```
+Per-Process Network Traffic
+==============================================================================
+PID      PROCESS                       RX           TX     RX_PKT     TX_PKT
+------------------------------------------------------------------------------
+1842     chrome                    1.1 MiB    332.0 KiB        800        200
+5678     curl                     48.8 KiB      9.8 KiB        100         50
+-        unknown                  43.9 KiB        0 B          30          0
+------------------------------------------------------------------------------
+         TOTAL                     1.2 MiB    341.8 KiB        930        250
 ```
 
 ## EXAMPLES
@@ -461,27 +394,28 @@ values are JSON numbers.
 ### Basic monitoring
 
 ```bash
-sudo netop
+sudo netoproc
 ```
 
 Launches the interactive TUI in Process View. Navigate with arrow keys,
 press `Tab` to switch views, `q` to quit.
 
-### Snapshot in JSON, find top talkers
+### 5-second snapshot, find top talkers
 
 ```bash
-sudo netop snapshot --format json | jq '
-  [.processes[] | {
-    name: .name,
-    rx: ([.sockets[].connections[].rx_bytes_total] | add // 0),
-    tx: ([.sockets[].connections[].tx_bytes_total] | add // 0)
-  }] | sort_by(.rx) | reverse | .[0:5]'
+sudo netoproc --duration 5 --format json | jq '.[0:5] | .[] | {process, rx_bytes, tx_bytes}'
+```
+
+### Human-readable snapshot
+
+```bash
+sudo netoproc --duration 5 --format pretty
 ```
 
 ### Monitor a specific interface
 
 ```bash
-sudo netop monitor --interface en0
+sudo netoproc --interface en0
 ```
 
 Only shows traffic and connections on the Wi-Fi interface.
@@ -489,23 +423,15 @@ Only shows traffic and connections on the Wi-Fi interface.
 ### Filter for a specific process
 
 ```bash
-sudo netop monitor --filter firefox
+sudo netoproc --filter firefox
 ```
 
 Only shows processes, connections, and DNS queries matching "firefox".
 
-### Fast refresh for debugging
+### TSV snapshot with column alignment
 
 ```bash
-sudo netop monitor --interval 0.5
-```
-
-Updates the display twice per second for more responsive monitoring.
-
-### TSV snapshot with human-readable formatting
-
-```bash
-sudo netop snapshot | column -t -s $'\t'
+sudo netoproc --duration 5 | column -t -s $'\t'
 ```
 
 Aligns columns for easy reading in the terminal.
@@ -513,33 +439,17 @@ Aligns columns for easy reading in the terminal.
 ### Monitor without DNS overhead
 
 ```bash
-sudo netop monitor --no-dns
+sudo netoproc --no-dns
 ```
 
 Disables DNS query capture and the DNS view. Useful if you only care about
 traffic volume, not DNS activity.
 
-### Pipe TSV to find connections to a specific remote
-
-```bash
-sudo netop snapshot | awk -F'\t' '$6 ~ /8\.8\.8\.8/'
-```
-
-Finds all connections to Google DNS (8.8.8.8).
-
-### Check DNS resolver performance
-
-```bash
-sudo netop snapshot --format json | jq '.dns.resolvers | sort_by(.avg_latency_ms)'
-```
-
-Lists DNS resolvers sorted by average latency.
-
 ### Continuous logging (append snapshots every 60 seconds)
 
 ```bash
 while true; do
-    sudo netop snapshot --format tsv >> /tmp/netop-log.tsv
+    sudo netoproc --duration 5 --format tsv >> /tmp/netop-log.tsv
     echo "" >> /tmp/netop-log.tsv
     sleep 60
 done

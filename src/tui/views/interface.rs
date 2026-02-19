@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::model::{InterfaceStatus, SystemNetworkState};
 
@@ -52,9 +52,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SystemNetworkState) {
         return;
     }
 
-    // Each interface card needs roughly 10 rows: border top, status, IPs, rates, totals,
-    // packets, errors, sparkline RX, sparkline TX, border bottom.
-    let card_height: u16 = 12;
+    // Each interface card needs roughly 9 rows: border top/bottom + 5 info lines + padding.
+    let card_height: u16 = 9;
     let iface_count = state.interfaces.len();
 
     let constraints: Vec<Constraint> = state
@@ -101,16 +100,6 @@ fn render_interface_card(frame: &mut Frame, area: Rect, iface: &crate::model::In
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    // Split inner area: top for text info, bottom for sparklines.
-    let content_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5), // Text info lines
-            Constraint::Min(1),    // RX sparkline
-            Constraint::Min(1),    // TX sparkline
-        ])
-        .split(inner);
 
     // Build info lines.
     let label_style = Style::default()
@@ -174,24 +163,5 @@ fn render_interface_card(frame: &mut Frame, area: Rect, iface: &crate::model::In
     ];
 
     let info = Paragraph::new(lines);
-    frame.render_widget(info, content_chunks[0]);
-
-    // RX sparkline
-    let rx_data: Vec<u64> = iface.rx_timeseries.sparkline_data();
-    // Reverse so newest is on the right
-    let rx_display: Vec<u64> = rx_data.into_iter().rev().collect();
-    let rx_sparkline = Sparkline::default()
-        .block(Block::default().title(Span::styled("RX", Style::default().fg(Color::Green))))
-        .data(&rx_display)
-        .style(Style::default().fg(Color::Green));
-    frame.render_widget(rx_sparkline, content_chunks[1]);
-
-    // TX sparkline
-    let tx_data: Vec<u64> = iface.tx_timeseries.sparkline_data();
-    let tx_display: Vec<u64> = tx_data.into_iter().rev().collect();
-    let tx_sparkline = Sparkline::default()
-        .block(Block::default().title(Span::styled("TX", Style::default().fg(Color::Blue))))
-        .data(&tx_display)
-        .style(Style::default().fg(Color::Blue));
-    frame.render_widget(tx_sparkline, content_chunks[2]);
+    frame.render_widget(info, inner);
 }

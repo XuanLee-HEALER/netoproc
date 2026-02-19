@@ -2,56 +2,60 @@
 
 ## 1. Architecture Overview
 
-netop uses a three-thread architecture to separate blocking I/O (BPF packet
-capture), periodic system polling, and user interface rendering into independent
-execution contexts.
+netop uses a streaming three-thread architecture to separate blocking I/O
+(BPF packet capture), process table maintenance, and traffic statistics /
+UI rendering into independent execution contexts.
 
 ```
-┌────────────────────┐  ┌─────────────────────┐  ┌──────────────────────┐
-│  BPF Capture       │  │  Stats Poller        │  │  TUI / Snapshot      │
-│  Thread(s)         │  │  Thread              │  │  Thread              │
-│                    │  │                      │  │                      │
-│  Blocking read on  │  │  1s timer loop:      │  │  TUI: event loop     │
-│  /dev/bpfN         │  │  - drain BPF queue   │  │  with tick-based     │
-│  Parse packets     │  │  - poll system APIs  │  │  refresh             │
-│  Push to SPSC      │  │  - correlate data    │  │                      │
-│  ring buffer       │  │  - build snapshot    │  │  Snapshot: wait for  │
-│                    │  │  - publish via swap   │  │  first complete      │
-│  One thread per    │  │                      │  │  state, serialize,   │
-│  captured iface    │  │                      │  │  exit                │
-└────────┬───────────┘  └──────────┬────────────┘  └──────────┬───────────┘
-         │                         │                           │
-         │  SPSC ring buffer       │  arc-swap publish         │  arc-swap load
-         │  (PacketSummary)        │                           │
-         ▼                         ▼                           ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│                    Shared State Layer                                    │
-│                                                                          │
-│  BPF → Poller:  crossbeam SPSC channel (bounded, drop-oldest on full)    │
-│  Poller → TUI:  ArcSwap<SystemNetworkState> (lock-free read/write)       │
-└──────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Main Thread (Stats + UI)                   │
+│                                                               │
+│  Snapshot: drain channel → accumulate TrafficStats → output   │
+│  Monitor:  bridge thread builds SystemNetworkState for TUI    │
+└─────────────────────────────────────────────────────────────┘
+         ▲ sync_channel(8)                ▲ ArcSwap load (lock-free)
+         │ Vec<PacketSummary>             │
+┌────────┴───────────┐          ┌─────────┴──────────────┐
+│  BPF Capture       │          │  Process Refresh       │
+│  Thread(s)         │          │  Thread                │
+│                    │          │                        │
+│  Blocking read on  │          │  Every 500ms:          │
+│  /dev/bpfN         │          │  - libproc scan        │
+│  Parse packets     │          │  - build ProcessTable  │
+│  Set direction     │          │  - ArcSwap store       │
+│  Send batch via    │          │                        │
+│  sync_channel      │          │                        │
+└────────────────────┘          └────────────────────────┘
 ```
 
 ### Why Three Threads
 
-- **BPF Capture**: `read()` on BPF devices is a blocking syscall. It must run
-  in its own thread to avoid stalling the poller or UI. If monitoring multiple
-  interfaces, one thread per interface avoids head-of-line blocking.
-- **Stats Poller**: System API calls (`proc_listpids`, `sysctl`, `getifaddrs`)
-  are synchronous and can take 10-100ms collectively. Running them on a timer
-  thread prevents jitter in the UI refresh rate.
-- **TUI Renderer**: Must remain responsive to keyboard input. Cannot be blocked
-  by I/O or computation.
+- **BPF Capture**: `read()` on BPF devices is a blocking syscall with a 500ms
+  timeout. It must run in its own thread. If monitoring multiple interfaces,
+  one thread per interface avoids head-of-line blocking. Each read returns a
+  batch of packets sent as `Vec<PacketSummary>` through a bounded channel.
+- **Process Refresh**: Building the `ProcessTable` via libproc takes 50-100ms.
+  Running it on a dedicated thread (every 500ms) keeps the process table fresh
+  without blocking the stats main loop. Uses `ArcSwap` for lock-free publishing.
+- **Main Thread (Stats)**: Drains the packet channel, looks up each packet in
+  the process table, and accumulates per-process `TrafficStats`. In snapshot
+  mode, outputs results after the duration expires. In monitor mode, a bridge
+  thread adapts the data for the TUI.
 
-### Snapshot Mode Variant
+### Snapshot Mode
 
-In snapshot mode, the TUI thread is replaced by a one-shot serializer:
-1. Wait for stats poller to publish its first complete `SystemNetworkState`.
-2. Load the state from `ArcSwap`.
-3. Serialize to TSV or JSON.
-4. Write to stdout.
-5. Signal all threads to shut down.
-6. Exit.
+In snapshot mode, the main thread:
+1. Accumulates `HashMap<ProcessKey, TrafficStats>` from packet batches.
+2. After the specified duration, calls `drain_final()` to join BPF threads
+   and drain remaining channel data.
+3. Serializes per-process traffic to TSV, JSON, or pretty format.
+4. Exits.
+
+### Monitor Mode
+
+In monitor mode, a bridge thread drains packets, polls system APIs, and
+builds `SystemNetworkState` for TUI compatibility. The TUI runs in the
+main thread with its existing event loop and views.
 
 ## 2. Module Decomposition
 
@@ -77,6 +81,7 @@ src/
 │
 ├── model/
 │   ├── mod.rs              SystemNetworkState and all child structs
+│   ├── traffic.rs          SocketKey, ProcessInfo, ProcessKey, TrafficStats, ProcessTable
 │   ├── timeseries.rs       RingBuffer<T, N>, aggregation logic
 │   └── correlation.rs      Join process↔socket↔connection, DNS→process attribution
 │
@@ -86,8 +91,9 @@ src/
 │
 ├── output/
 │   ├── mod.rs              Snapshot mode dispatcher
-│   ├── tsv.rs              TSV serializer
-│   └── json.rs             JSON serializer (serde)
+│   ├── tsv.rs              TSV serializer (per-process traffic table)
+│   ├── json.rs             JSON serializer (per-process traffic array)
+│   └── pretty.rs           Human-readable table with formatted sizes
 │
 └── tui/
     ├── mod.rs              App state, main event loop, view routing
@@ -233,48 +239,49 @@ auto-scaling units. `FilterBar` renders the text input area.
 
 ## 3. Concurrency Architecture
 
-### 3.1 Thread Model Detail
+### 3.1 Thread Model Detail (v0.2.0)
 
 ```
 Thread 1: BPF Capture (one per interface)
+  let mut pkt_buf = Vec::new();
   loop {
-      let n = read(bpf_fd, &mut buffer);  // blocks until packets available
-      let summaries = parse_bpf_buffer(&buffer[..n]);
-      for summary in summaries {
-          match tx.try_send(summary) {
-              Ok(()) => {},
-              Err(TrySendError::Full(_)) => drop_count += 1,  // back-pressure: drop oldest
-              Err(TrySendError::Disconnected(_)) => return,    // shutdown signal
-          }
+      if SHUTDOWN_REQUESTED { return; }
+      cap.read_packets(&mut pkt_buf);   // blocks for up to 500ms
+      for pkt in &mut pkt_buf {
+          pkt.direction = if local_ips.contains(&pkt.dst_ip) {
+              Direction::Inbound
+          } else {
+              Direction::Outbound
+          };
       }
+      let batch = std::mem::take(&mut pkt_buf);
+      tx.send(batch);   // blocks if channel full (backpressure)
   }
 
-Thread 2: Stats Poller
+Thread 2: Process Refresh
   loop {
-      sleep_until(next_tick);  // 1-second aligned ticks
-      let packets: Vec<PacketSummary> = rx.try_iter().collect();  // drain all pending
-      let raw_procs = system::process::list_processes();
-      let raw_tcp = system::connection::list_tcp_connections();
-      let raw_udp = system::connection::list_udp_connections();
-      let raw_ifaces = system::interface::list_interfaces();
-      let raw_dns_cfg = system::dns_config::list_dns_resolvers();
-      let prev = shared_state.load();
-      let new_state = state::merge::merge_into_state(&prev, raw_data, packets);
-      shared_state.store(Arc::new(new_state));  // atomic swap, readers see new state
-      next_tick += interval;
+      if SHUTDOWN_REQUESTED { return; }
+      thread::sleep(Duration::from_millis(500));
+      let new_table = build_process_table();
+      process_table.store(Arc::new(new_table));   // ArcSwap atomic swap
   }
 
-Thread 3: TUI Renderer
-  loop {
-      match event_rx.recv_timeout(tick_interval) {
-          Ok(Event::Key(key)) => handle_key(key, &mut app),
-          Ok(Event::Resize(w, h)) => handle_resize(w, h, &mut app),
-          Ok(Event::Tick) | Err(RecvTimeoutError::Timeout) => {},
+Main Thread: Stats + Output
+  // Snapshot mode:
+  let mut stats: HashMap<ProcessKey, TrafficStats> = HashMap::new();
+  while elapsed < duration {
+      match pkt_rx.recv_timeout(100ms) {
+          Ok(batch) => accumulate_batch(&batch, &process_table, &mut stats),
+          Err(Timeout) => continue,
+          Err(Disconnected) => break,
       }
-      let state = shared_state.load();  // lock-free Arc clone
-      terminal.draw(|frame| render_view(frame, &state, &app))?;
-      if app.should_quit { break; }
   }
+  drain_final(&pkt_rx, &process_table, &mut stats, bpf_handles);
+  output::write_snapshot(&stats, format, &mut stdout);
+
+  // Monitor mode:
+  // Bridge thread flattens batches + uses old merge for TUI compatibility.
+  // TUI runs in main thread with existing event loop.
 ```
 
 ### 3.2 Data Sharing: ArcSwap
@@ -290,34 +297,40 @@ This is preferred over `RwLock` because:
 - The cost is one extra `Arc` clone per read (negligible).
 - Old states are automatically dropped when all readers release their guards.
 
-### 3.3 BPF-to-Poller Channel
+### 3.3 BPF-to-Stats Channel
 
-Use `crossbeam_channel::bounded(capacity)` with capacity = 100,000 packet summaries.
+Use `std::sync::mpsc::sync_channel::<Vec<PacketSummary>>(8)` — a bounded channel
+of packet batches with capacity 8.
 
-Rationale for bounded + drop-oldest:
-- At 250K pps (1 Gbps with 500-byte packets), the 1-second drain interval means
-  up to 250K packets queue up. With 100K capacity, approximately 60% are captured
-  in worst case. This is acceptable because byte counting is statistical —
-  the rate computation remains accurate within ~5% due to the law of large numbers
-  applied to packet size distribution.
-- Alternative: unbounded channel risks OOM under sustained high traffic.
-- Alternative: blocking channel risks stalling BPF reads, causing kernel buffer
-  overflow and losing MORE packets. Drop-oldest is the least-bad option.
-
-`PacketSummary` size: ~48 bytes. 100K entries = ~4.8 MB. Acceptable.
+Rationale for batch channel with capacity 8:
+- Each BPF `read()` blocks for up to 500ms (read timeout). The resulting batch
+  is sent as a single `Vec<PacketSummary>`.
+- Capacity 8 = 4 seconds of headroom before backpressure starts.
+- When the channel is full, the BPF thread's `send()` blocks, which naturally
+  delays the next `read()`. This is correct backpressure behavior — the kernel
+  BPF buffer absorbs the delay.
+- Unlike the previous per-packet channel, batching avoids channel overhead for
+  high packet counts and eliminates the need for drop-oldest semantics.
 
 ### 3.4 Shutdown Protocol
 
-1. User presses `q` or `Ctrl-C` in TUI (or snapshot completes).
-2. TUI thread sets `app.should_quit = true`, breaks event loop.
-3. TUI thread drops the `crossbeam_channel::Sender<()>` shutdown channel.
-4. Stats poller receives disconnect on shutdown channel, exits loop.
-5. Stats poller drops the `crossbeam_channel::Sender<PacketSummary>` end.
-6. BPF capture thread(s) receive disconnect on packet channel, exit.
-7. Main thread joins all threads, restores terminal state, exits.
+Uses a global `AtomicBool` (`SHUTDOWN_REQUESTED`) set by SIGTERM/SIGINT signal
+handlers and checked by all threads.
 
-Alternative: use `AtomicBool` for shutdown flag. Simpler but requires polling.
-The channel approach gives instant wake-up on shutdown.
+**Snapshot mode (duration expired)**:
+1. Main thread detects `elapsed >= duration`.
+2. Calls `drain_final()`: sets `SHUTDOWN_REQUESTED = true`, joins BPF threads
+   (which drop their `SyncSender`), drains remaining channel data.
+3. Outputs final statistics.
+4. Sets `SHUTDOWN_REQUESTED = true`, joins process refresh and DNS threads.
+5. Exit code 0.
+
+**Monitor mode (Ctrl-C or `q`)**:
+1. TUI exits its event loop.
+2. Main thread sets `SHUTDOWN_REQUESTED = true`.
+3. Joins bridge thread, BPF threads, process refresh thread, DNS thread.
+4. Restores terminal state.
+5. Exit code 0.
 
 ## 4. BPF Subsystem Design
 
@@ -346,15 +359,20 @@ fn open_bpf_device() -> Result<OwnedFd, NetopError> {
 After opening `/dev/bpfN`:
 
 ```
-1. BIOCSBLEN(buffer_size)      // Set read buffer size (default 32 KB)
+1. BIOCSBLEN(buffer_size)      // Set read buffer size (default 2 MB)
 2. BIOCSETIF(interface_name)   // Bind to network interface
-3. BIOCIMMEDIATE(1)            // Return packets immediately (don't wait for full buffer)
+3. BIOCSRTIMEOUT(500ms)        // Set read timeout (500ms)
 4. BIOCSETF(filter_program)    // Install BPF filter (header-only capture)
 5. BIOCPROMISC                 // Enable promiscuous mode (capture all traffic, not just ours)
 6. BIOCGBLEN -> actual_size    // Read back actual buffer size (kernel may adjust)
 ```
 
 The read buffer (`Vec<u8>`) is allocated to `actual_size` after step 6.
+
+> **v0.2.0**: `BIOCIMMEDIATE` is no longer set. Without it, the kernel buffers
+> packets until the read timeout (500ms) or the buffer fills, whichever comes
+> first. This reduces small reads and matches the batch-oriented channel design.
+> The default buffer size is now 2 MB (was 32 KB).
 
 ### 4.3 BPF Filter Programs
 
@@ -934,6 +952,7 @@ fn main() {
 | `thiserror` | 1.x | Error type derivation | Reduces boilerplate for NetopError enum. |
 | `log` | 0.4+ | Logging facade | Debug-level logging for development. Silent in normal operation. |
 | `env_logger` | 0.11+ | Log output (debug) | Activated via RUST_LOG env var for troubleshooting. |
+| `rustc-hash` | 2.x | FxHashMap for ProcessTable | Faster hashing for short fixed-size keys (SocketKey). |
 
 ### Explicitly Excluded
 
@@ -949,11 +968,13 @@ fn main() {
 
 ### 10.1 BPF Capture Optimization
 
-- **Buffer size**: 32 KB default (adjustable via `--bpf-buffer`). Small because
-  we only capture headers (~96 bytes per packet). At 250K pps, the kernel fills
-  a 32 KB buffer in ~1ms, ensuring prompt delivery.
-- **BIOCIMMEDIATE**: Set to 1 so the kernel returns partial buffers immediately
-  instead of waiting for the buffer to fill. Trades throughput for latency.
+- **Buffer size**: 2 MB default (adjustable via `--bpf-buffer`). With
+  `BIOCIMMEDIATE` disabled, the kernel buffers packets for up to 500ms. 2 MB
+  provides ample space for typical desktop/server traffic during this window.
+- **Batch sending**: Each `read()` returns a batch of packets sent as a single
+  `Vec<PacketSummary>` through the channel, amortizing channel overhead.
+- **Vec reuse**: The BPF capture thread reuses a `Vec` across iterations via
+  `std::mem::take`, avoiding per-read heap allocation.
 - **Zero-copy parsing**: Parse packet headers directly from the read buffer
   using byte slice indexing. No packet-level heap allocation.
 
@@ -994,7 +1015,7 @@ fn main() {
 | D1 | Packet capture mechanism | Raw BPF (`/dev/bpfN`) | libpcap, Network Extension framework | Full control over buffer sizes, filters, and immediate mode. No external library dependency. macOS-only so no portability need. |
 | D2 | DNS wire format parsing | Hand-written parser | hickory-dns, trust-dns-proto | Minimal code (~200 lines). Avoids 50+ transitive deps. We only need query/response parsing, not resolution. |
 | D3 | Shared state between threads | `arc_swap::ArcSwap` | `RwLock<SystemNetworkState>`, channels | Lock-free reads for TUI thread. No reader-writer contention. Writer cost is one atomic swap per second. |
-| D4 | BPF→Poller data transfer | Bounded crossbeam channel (100K) | Unbounded channel, shared buffer, lock-free SPSC ring | Bounded prevents OOM. crossbeam is well-tested. try_send drops oldest on full (acceptable for statistical counting). |
+| D4 | BPF→Stats data transfer | Bounded `sync_channel(8)` of `Vec<PacketSummary>` batches | Unbounded channel, per-packet channel, lock-free SPSC ring | Batch sending amortizes channel overhead. Capacity 8 = 4s headroom. Blocking send provides natural backpressure. |
 | D5 | TUI framework | ratatui + crossterm | cursive, tui-realm, termion | ratatui is the Rust ecosystem standard. Active maintenance. Immediate mode rendering. crossterm is the recommended backend. |
 | D6 | FFI binding generation | Hand-written `#[repr(C)]` | bindgen at build time | Avoids libclang build dependency. Struct layouts are stable on macOS. Size assertions catch errors. |
 | D7 | Process enumeration | Sequential, cached | Parallel with rayon | 500 processes take ~50ms sequential. Not worth the complexity of parallelism. Cache PID list for 5s. |

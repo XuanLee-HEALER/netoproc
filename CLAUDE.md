@@ -41,7 +41,7 @@ just fmt-check      # cargo fmt --check
 just lint           # check + clippy + fmt-check combined
 just clean          # cargo clean
 just run            # sudo cargo run
-just run-snapshot   # sudo cargo run -- snapshot
+just run-snapshot   # sudo cargo run -- --duration 5
 just doc            # cargo doc --no-deps --open
 ```
 
@@ -60,10 +60,12 @@ Run `just --list` to see all available recipes.
 
 ## Architecture Quick Reference
 
-Three-thread model:
-- **BPF capture thread**: blocking read on `/dev/bpfN`, pushes `PacketSummary` to SPSC channel
-- **Stats poller thread**: drains channel, polls system APIs, publishes `SystemNetworkState` via `ArcSwap`
-- **TUI/snapshot thread**: reads `ArcSwap`, renders or serializes
+Three-thread streaming model (v0.2.0):
+- **BPF capture thread**: blocking read on `/dev/bpfN`, sends `Vec<PacketSummary>` batches via `sync_channel(8)`
+- **Process refresh thread**: rebuilds `ProcessTable` every 500ms, publishes via `ArcSwap`
+- **Main thread (stats)**: drains packet channel, attributes to processes via `ProcessTable` lookup, accumulates `TrafficStats`
+  - Snapshot mode: outputs per-process traffic table after duration expires
+  - Monitor mode: bridge thread builds `SystemNetworkState` for TUI; TUI runs in main thread
 
 Key modules: `bpf/`, `system/`, `model/`, `state/`, `output/`, `tui/`
 See DESIGN.md §2 for full module map.
@@ -84,7 +86,7 @@ just lint           # full lint pass (check + clippy + fmt)
 
 ## Dependencies (key crates)
 
-clap, ratatui, crossterm, serde, serde_json, arc-swap, crossbeam-channel, libc, thiserror, log, env_logger
+clap, ratatui, crossterm, serde, serde_json, arc-swap, crossbeam-channel, libc, thiserror, log, env_logger, rustc-hash
 
 **Not used** (by design): libpcap, tokio, bindgen, nix, hickory-dns
 See DESIGN.md §9 for rationale.
@@ -107,8 +109,8 @@ See DESIGN.md §9 for rationale.
 
 ### Running the application
 ```
-just run                          # TUI mode
-just run-snapshot                 # snapshot mode (TSV)
-sudo cargo run -- snapshot --format json   # snapshot JSON
-sudo cargo run -- monitor --interval 0.5   # fast refresh
+just run                                          # TUI mode (default)
+sudo cargo run -- --duration 5                    # snapshot mode (TSV, 5 seconds)
+sudo cargo run -- --duration 5 --format json      # snapshot JSON
+sudo cargo run -- --duration 5 --format pretty    # snapshot human-readable
 ```

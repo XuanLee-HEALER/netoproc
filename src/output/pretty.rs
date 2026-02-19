@@ -1,481 +1,155 @@
+use std::collections::HashMap;
 use std::io::Write;
 
 use crate::error::NetopError;
-use crate::model::{
-    Connection, Direction, Interface, Process, Socket, SocketState, SystemNetworkState,
-};
-use crate::output::tsv::aggregate_process_traffic;
-use crate::tui::widgets::rate::{format_bytes, format_rate};
+use crate::model::traffic::{ProcessKey, TrafficStats};
 
-/// Write a human-readable, process-organized tree view of the system network state.
-///
-/// Output is plain text (no ANSI colors) with Unicode box-drawing characters,
-/// designed to work well with `less` and `/pattern` search.
-pub fn write_pretty(state: &SystemNetworkState, writer: &mut impl Write) -> Result<(), NetopError> {
-    write_pretty_inner(state, writer).map_err(NetopError::Serialization)
+/// Write per-process traffic stats in a human-readable table format.
+pub fn write_pretty(
+    stats: &HashMap<ProcessKey, TrafficStats>,
+    writer: &mut impl Write,
+) -> Result<(), NetopError> {
+    write_pretty_inner(stats, writer).map_err(NetopError::Serialization)
 }
 
 fn write_pretty_inner(
-    state: &SystemNetworkState,
+    stats: &HashMap<ProcessKey, TrafficStats>,
     w: &mut impl Write,
 ) -> Result<(), std::io::Error> {
-    write_processes_section(state, w)?;
-    writeln!(w)?;
-    write_interfaces_section(state, w)?;
-    writeln!(w)?;
-    write_dns_section(state, w)?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Processes
-// ---------------------------------------------------------------------------
-
-fn write_processes_section(
-    state: &SystemNetworkState,
-    w: &mut impl Write,
-) -> Result<(), std::io::Error> {
-    let count = state.processes.len();
-    writeln!(
-        w,
-        "\u{256e}\u{2500} Processes ({count}) \u{2500}{:\u{2500}<width$}",
-        "",
-        width = 40
-    )?;
-
-    // Sort processes by aggregate traffic rate (rx+tx) descending.
-    let mut sorted: Vec<&Process> = state.processes.iter().collect();
-    sorted.sort_by(|a, b| {
-        let (a_rx, a_tx, _, _) = aggregate_process_traffic(a);
-        let (b_rx, b_tx, _, _) = aggregate_process_traffic(b);
-        let b_total = b_rx + b_tx;
-        let a_total = a_rx + a_tx;
-        b_total
-            .partial_cmp(&a_total)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    // Sort by total traffic descending.
+    let mut entries: Vec<_> = stats.iter().collect();
+    entries.sort_by(|a, b| {
+        let total_a = a.1.rx_bytes + a.1.tx_bytes;
+        let total_b = b.1.rx_bytes + b.1.tx_bytes;
+        total_b.cmp(&total_a)
     });
 
-    for proc in &sorted {
-        write_process(proc, w)?;
-    }
-
-    Ok(())
-}
-
-fn write_process(proc: &Process, w: &mut impl Write) -> Result<(), std::io::Error> {
-    let socket_count = proc.sockets.len();
-    let conn_count: usize = proc.sockets.iter().map(|s| s.connections.len()).sum();
-    let (rx_sec, tx_sec, rx_total, tx_total) = aggregate_process_traffic(proc);
-
+    writeln!(w, "Per-Process Network Traffic")?;
+    writeln!(w, "{}", "=".repeat(78))?;
     writeln!(
         w,
-        "{} (PID {}, {}) \u{2014} {} sockets, {} connections",
-        proc.name, proc.pid, proc.username, socket_count, conn_count
+        "{:<8} {:<24} {:>12} {:>12} {:>10} {:>10}",
+        "PID", "PROCESS", "RX", "TX", "RX_PKT", "TX_PKT"
     )?;
-    writeln!(
-        w,
-        "  rx: {}  tx: {}  total: {} rx / {} tx",
-        format_rate(rx_sec),
-        format_rate(tx_sec),
-        format_bytes(rx_total),
-        format_bytes(tx_total),
-    )?;
+    writeln!(w, "{}", "-".repeat(78))?;
 
-    let num_sockets = proc.sockets.len();
-    for (i, sock) in proc.sockets.iter().enumerate() {
-        let is_last_sock = i == num_sockets - 1;
-        write_socket(sock, is_last_sock, w)?;
-    }
-
-    writeln!(w)?;
-    Ok(())
-}
-
-fn write_socket(sock: &Socket, is_last: bool, w: &mut impl Write) -> Result<(), std::io::Error> {
-    let branch = if is_last {
-        "\u{2514}\u{2500}"
-    } else {
-        "\u{251c}\u{2500}"
-    };
-    let continuation = if is_last { "  " } else { "\u{2502} " };
-
-    if sock.connections.is_empty() {
-        // Listening/bound socket with no connections — single line.
+    for (key, traffic) in &entries {
+        let (pid_str, name) = match key {
+            ProcessKey::Known { pid, name } => (pid.to_string(), name.as_str()),
+            ProcessKey::Unknown => ("-".to_string(), "unknown"),
+        };
         writeln!(
             w,
-            "  {branch} [{proto}] {addr} {state}",
-            proto = sock.protocol,
-            addr = sock.local_addr,
-            state = sock.state,
+            "{:<8} {:<24} {:>12} {:>12} {:>10} {:>10}",
+            pid_str,
+            truncate(name, 24),
+            format_bytes(traffic.rx_bytes),
+            format_bytes(traffic.tx_bytes),
+            traffic.rx_packets,
+            traffic.tx_packets,
         )?;
-    } else if sock.state == SocketState::Listen || sock.state == SocketState::Bound {
-        // Listening socket with inbound connections.
-        writeln!(
-            w,
-            "  {branch} [{proto}] {addr} {state}",
-            proto = sock.protocol,
-            addr = sock.local_addr,
-            state = sock.state,
-        )?;
-        let num_conns = sock.connections.len();
-        for (j, conn) in sock.connections.iter().enumerate() {
-            let is_last_conn = j == num_conns - 1;
-            let conn_branch = if is_last_conn {
-                "\u{2514}\u{2500}"
-            } else {
-                "\u{251c}\u{2500}"
-            };
-            let arrow = direction_arrow(conn);
-            writeln!(
-                w,
-                "  {continuation}  {conn_branch} {arrow} {remote} {state}  rx: {rx}  tx: {tx}",
-                remote = conn.remote_addr,
-                state = sock.state,
-                rx = format_rate(conn.rx_rate.bytes_per_sec),
-                tx = format_rate(conn.tx_rate.bytes_per_sec),
-            )?;
-        }
-    } else {
-        // Outbound or single connection — show on the socket line itself.
-        for (j, conn) in sock.connections.iter().enumerate() {
-            let actual_branch = if j == 0 {
-                branch
-            } else if is_last && j == sock.connections.len() - 1 {
-                "  \u{2514}\u{2500}"
-            } else {
-                &format!("  {continuation}\u{251c}\u{2500}")
-            };
-
-            let arrow = direction_arrow(conn);
-            if j == 0 {
-                writeln!(
-                    w,
-                    "  {actual_branch} [{proto}] {local} {arrow} {remote} {state}",
-                    proto = sock.protocol,
-                    local = sock.local_addr,
-                    remote = conn.remote_addr,
-                    state = sock.state,
-                )?;
-                // Print rate on a continuation line if non-zero.
-                if conn.rx_rate.bytes_per_sec > 0.0 || conn.tx_rate.bytes_per_sec > 0.0 {
-                    writeln!(
-                        w,
-                        "  {continuation}        rx: {}  tx: {}",
-                        format_rate(conn.rx_rate.bytes_per_sec),
-                        format_rate(conn.tx_rate.bytes_per_sec),
-                    )?;
-                }
-            } else {
-                writeln!(
-                    w,
-                    "  {actual_branch} {arrow} {remote} {state}  rx: {rx}  tx: {tx}",
-                    remote = conn.remote_addr,
-                    state = sock.state,
-                    rx = format_rate(conn.rx_rate.bytes_per_sec),
-                    tx = format_rate(conn.tx_rate.bytes_per_sec),
-                )?;
-            }
-        }
     }
 
-    Ok(())
-}
-
-fn direction_arrow(conn: &Connection) -> &'static str {
-    match conn.direction {
-        Direction::Outbound => "\u{2192}",
-        Direction::Inbound => "\u{2190}",
+    if entries.is_empty() {
+        writeln!(w, "(no traffic captured)")?;
     }
-}
 
-// ---------------------------------------------------------------------------
-// Interfaces
-// ---------------------------------------------------------------------------
+    writeln!(w, "{}", "-".repeat(78))?;
 
-fn write_interfaces_section(
-    state: &SystemNetworkState,
-    w: &mut impl Write,
-) -> Result<(), std::io::Error> {
-    let count = state.interfaces.len();
+    // Summary line.
+    let total_rx: u64 = stats.values().map(|s| s.rx_bytes).sum();
+    let total_tx: u64 = stats.values().map(|s| s.tx_bytes).sum();
+    let total_rx_pkt: u64 = stats.values().map(|s| s.rx_packets).sum();
+    let total_tx_pkt: u64 = stats.values().map(|s| s.tx_packets).sum();
     writeln!(
         w,
-        "\u{256e}\u{2500} Interfaces ({count}) \u{2500}{:\u{2500}<width$}",
+        "{:<8} {:<24} {:>12} {:>12} {:>10} {:>10}",
         "",
-        width = 39
+        "TOTAL",
+        format_bytes(total_rx),
+        format_bytes(total_tx),
+        total_rx_pkt,
+        total_tx_pkt,
     )?;
-
-    let (active, inactive): (Vec<&Interface>, Vec<&Interface>) = state
-        .interfaces
-        .iter()
-        .partition(|i| i.rx_bytes_total > 0 || i.tx_bytes_total > 0);
-
-    for iface in &active {
-        write_interface(iface, w)?;
-    }
-
-    if !inactive.is_empty() {
-        writeln!(w, "  ({} more with no traffic)", inactive.len())?;
-    }
 
     Ok(())
 }
 
-fn write_interface(iface: &Interface, w: &mut impl Write) -> Result<(), std::io::Error> {
-    let ip = iface.ipv4_addresses.first().cloned().unwrap_or_default();
-
-    writeln!(
-        w,
-        "{name:<12}{ip:<17}{status:<6}rx: {rx_total} ({rx_rate})  tx: {tx_total} ({tx_rate})",
-        name = iface.name,
-        status = iface.status,
-        rx_total = format_bytes(iface.rx_bytes_total),
-        rx_rate = format_rate(iface.rx_bytes_rate),
-        tx_total = format_bytes(iface.tx_bytes_total),
-        tx_rate = format_rate(iface.tx_bytes_rate),
-    )?;
-
-    // Second line: IPv6, packet/error counts.
-    let ipv6 = iface
-        .ipv6_addresses
-        .first()
-        .map(|a| truncate_ipv6(a))
-        .unwrap_or_default();
-
-    if !ipv6.is_empty() || iface.rx_packets > 0 {
-        writeln!(
-            w,
-            "{:12}{ipv6:<17}      pkts: {rx_pkts}/{tx_pkts}  err: {rx_err}/{tx_err}",
-            "",
-            rx_pkts = iface.rx_packets,
-            tx_pkts = iface.tx_packets,
-            rx_err = iface.rx_errors,
-            tx_err = iface.tx_errors,
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Truncate long IPv6 addresses for display (keep first 12 chars + "...").
-fn truncate_ipv6(addr: &str) -> String {
-    if addr.len() > 15 {
-        format!("{}...", &addr[..12])
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GiB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KiB", bytes as f64 / 1024.0)
     } else {
-        addr.to_string()
+        format!("{} B", bytes)
     }
 }
 
-// ---------------------------------------------------------------------------
-// DNS
-// ---------------------------------------------------------------------------
-
-fn write_dns_section(state: &SystemNetworkState, w: &mut impl Write) -> Result<(), std::io::Error> {
-    writeln!(
-        w,
-        "\u{256e}\u{2500} DNS \u{2500}{:\u{2500}<width$}",
-        "",
-        width = 51
-    )?;
-
-    writeln!(w, "Resolvers:")?;
-    if state.dns.resolvers.is_empty() {
-        writeln!(w, "  (none)")?;
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
     } else {
-        for r in &state.dns.resolvers {
-            writeln!(
-                w,
-                "  {} \u{2192} {}  ({} queries, {:.1}ms avg, {:.1}% fail)",
-                r.interface, r.server, r.query_count, r.avg_latency_ms, r.failure_rate_pct,
-            )?;
-        }
+        format!("{}...", &s[..max - 3])
     }
-
-    writeln!(w)?;
-    writeln!(w, "Recent Queries:")?;
-    if state.dns.queries.is_empty() {
-        writeln!(w, "  (none)")?;
-    } else {
-        let display_count = state.dns.queries.len().min(20);
-        for q in state.dns.queries.iter().take(display_count) {
-            let pid_str = match q.pid {
-                Some(pid) => format!("PID {pid}"),
-                None => "?".to_string(),
-            };
-            writeln!(
-                w,
-                "  {} {} ({}) \u{2192} {} ({}, {:.1}ms, via {})",
-                q.query_type,
-                q.query_name,
-                pid_str,
-                q.response,
-                q.process,
-                q.latency_ms,
-                q.resolver,
-            )?;
-        }
-        if state.dns.queries.len() > display_count {
-            writeln!(
-                w,
-                "  ... and {} more",
-                state.dns.queries.len() - display_count
-            )?;
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::timeseries::AggregatedTimeSeries;
-    use crate::model::*;
 
-    fn state_with_data() -> SystemNetworkState {
-        SystemNetworkState {
-            timestamp: 1000,
-            interfaces: vec![
-                Interface {
-                    name: "en0".to_string(),
-                    ipv4_addresses: vec!["192.168.3.12".to_string()],
-                    ipv6_addresses: vec!["fe80::c77:abcd:ef01:2345".to_string()],
-                    dns_servers: vec![],
-                    search_domains: vec![],
-                    status: InterfaceStatus::Up,
-                    rx_bytes_rate: 1200.0,
-                    tx_bytes_rate: 340.0,
-                    rx_bytes_total: 2_100_000_000,
-                    tx_bytes_total: 336_000_000,
-                    rx_packets: 1_760_640,
-                    tx_packets: 745_472,
-                    rx_errors: 0,
-                    tx_errors: 0,
-                    rx_timeseries: AggregatedTimeSeries::new(),
-                    tx_timeseries: AggregatedTimeSeries::new(),
-                },
-                Interface {
-                    name: "lo0".to_string(),
-                    ipv4_addresses: vec!["127.0.0.1".to_string()],
-                    ipv6_addresses: vec![],
-                    dns_servers: vec![],
-                    search_domains: vec![],
-                    status: InterfaceStatus::Up,
-                    rx_bytes_rate: 0.0,
-                    tx_bytes_rate: 0.0,
-                    rx_bytes_total: 0,
-                    tx_bytes_total: 0,
-                    rx_packets: 0,
-                    tx_packets: 0,
-                    rx_errors: 0,
-                    tx_errors: 0,
-                    rx_timeseries: AggregatedTimeSeries::new(),
-                    tx_timeseries: AggregatedTimeSeries::new(),
-                },
-            ],
-            processes: vec![
-                Process {
-                    pid: 3556,
-                    name: "verge-mihomo".to_string(),
-                    cmdline: String::new(),
-                    uid: 0,
-                    username: "root".to_string(),
-                    sockets: vec![
-                        Socket {
-                            fd: 10,
-                            protocol: Protocol::Tcp,
-                            local_addr: "127.0.0.1:7897".to_string(),
-                            state: SocketState::Listen,
-                            connections: vec![],
-                        },
-                        Socket {
-                            fd: 11,
-                            protocol: Protocol::Tcp,
-                            local_addr: "192.168.3.12:53181".to_string(),
-                            state: SocketState::Established,
-                            connections: vec![Connection {
-                                remote_addr: "64.64.252.128:443".to_string(),
-                                direction: Direction::Outbound,
-                                interface: "en0".to_string(),
-                                rx_rate: RateMetrics {
-                                    bytes_per_sec: 500.0,
-                                    bytes_per_min: 30000.0,
-                                },
-                                tx_rate: RateMetrics {
-                                    bytes_per_sec: 120.0,
-                                    bytes_per_min: 7200.0,
-                                },
-                                rx_bytes_total: 50000,
-                                tx_bytes_total: 12000,
-                                stability: None,
-                                rx_timeseries: AggregatedTimeSeries::new(),
-                                tx_timeseries: AggregatedTimeSeries::new(),
-                            }],
-                        },
-                    ],
-                },
-                Process {
-                    pid: 11598,
-                    name: "Code Helper".to_string(),
-                    cmdline: String::new(),
-                    uid: 501,
-                    username: "mouselee".to_string(),
-                    sockets: vec![Socket {
-                        fd: 20,
-                        protocol: Protocol::Tcp,
-                        local_addr: "198.18.0.1:59349".to_string(),
-                        state: SocketState::Established,
-                        connections: vec![Connection {
-                            remote_addr: "198.18.0.235:443".to_string(),
-                            direction: Direction::Outbound,
-                            interface: "utun1024".to_string(),
-                            rx_rate: RateMetrics {
-                                bytes_per_sec: 0.0,
-                                bytes_per_min: 0.0,
-                            },
-                            tx_rate: RateMetrics {
-                                bytes_per_sec: 0.0,
-                                bytes_per_min: 0.0,
-                            },
-                            rx_bytes_total: 0,
-                            tx_bytes_total: 0,
-                            stability: None,
-                            rx_timeseries: AggregatedTimeSeries::new(),
-                            tx_timeseries: AggregatedTimeSeries::new(),
-                        }],
-                    }],
-                },
-            ],
-            dns: DnsObservatory {
-                resolvers: vec![DnsResolver {
-                    interface: "global".to_string(),
-                    server: "223.6.6.6".to_string(),
-                    avg_latency_ms: 0.0,
-                    failure_rate_pct: 0.0,
-                    query_count: 0,
-                }],
-                queries: vec![],
+    fn make_stats() -> HashMap<ProcessKey, TrafficStats> {
+        let mut stats = HashMap::new();
+        stats.insert(
+            ProcessKey::Known {
+                pid: 3556,
+                name: "verge-mihomo".to_string(),
             },
-        }
+            TrafficStats {
+                rx_bytes: 50000,
+                tx_bytes: 12000,
+                rx_packets: 100,
+                tx_packets: 50,
+            },
+        );
+        stats.insert(
+            ProcessKey::Known {
+                pid: 11598,
+                name: "Code Helper".to_string(),
+            },
+            TrafficStats {
+                rx_bytes: 0,
+                tx_bytes: 0,
+                rx_packets: 0,
+                tx_packets: 0,
+            },
+        );
+        stats
     }
 
     #[test]
-    fn pretty_contains_section_headers() {
+    fn pretty_contains_header() {
+        let stats = make_stats();
         let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("Processes (2)"));
-        assert!(output.contains("Interfaces (2)"));
-        assert!(output.contains("DNS"));
+        assert!(output.contains("Per-Process Network Traffic"));
+        assert!(output.contains("PID"));
+        assert!(output.contains("PROCESS"));
+        assert!(output.contains("RX"));
+        assert!(output.contains("TX"));
     }
 
     #[test]
-    fn pretty_processes_sorted_by_traffic() {
+    fn pretty_sorted_by_traffic() {
+        let stats = make_stats();
         let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        // verge-mihomo has traffic, Code Helper has 0 — verge should appear first.
+        // verge-mihomo has traffic, Code Helper has 0.
         let pos_verge = output.find("verge-mihomo").unwrap();
         let pos_code = output.find("Code Helper").unwrap();
         assert!(
@@ -485,21 +159,20 @@ mod tests {
     }
 
     #[test]
-    fn pretty_inactive_interfaces_collapsed() {
+    fn pretty_empty_stats() {
+        let stats = HashMap::new();
         let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        // lo0 has 0 traffic — should be collapsed into summary.
-        assert!(output.contains("1 more with no traffic"));
-        // en0 should appear as a full line.
-        assert!(output.contains("en0"));
+        assert!(output.contains("(no traffic captured)"));
     }
 
     #[test]
     fn pretty_no_ansi_codes() {
+        let stats = make_stats();
         let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
         assert!(
@@ -509,34 +182,54 @@ mod tests {
     }
 
     #[test]
-    fn pretty_empty_state() {
+    fn pretty_summary_line() {
+        let stats = make_stats();
         let mut buf = Vec::new();
-        write_pretty(&SystemNetworkState::empty(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        assert!(output.contains("Processes (0)"));
-        assert!(output.contains("Interfaces (0)"));
-        assert!(output.contains("(none)"));
+        assert!(output.contains("TOTAL"));
     }
 
     #[test]
-    fn pretty_dns_resolvers_shown() {
-        let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
-        let output = String::from_utf8(buf).unwrap();
-
-        assert!(output.contains("223.6.6.6"));
-        assert!(output.contains("Recent Queries:"));
-        assert!(output.contains("(none)"));
+    fn pretty_format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(500), "500 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB");
+        assert_eq!(format_bytes(1_073_741_824), "1.0 GiB");
     }
 
     #[test]
-    fn pretty_connection_arrows() {
+    fn pretty_truncate() {
+        assert_eq!(truncate("short", 24), "short");
+        assert_eq!(
+            truncate(
+                "this is a very long process name that should be truncated",
+                24
+            ),
+            "this is a very long p..."
+        );
+    }
+
+    #[test]
+    fn pretty_unknown_process() {
+        let mut stats = HashMap::new();
+        stats.insert(
+            ProcessKey::Unknown,
+            TrafficStats {
+                rx_bytes: 100,
+                tx_bytes: 0,
+                rx_packets: 1,
+                tx_packets: 0,
+            },
+        );
+
         let mut buf = Vec::new();
-        write_pretty(&state_with_data(), &mut buf).unwrap();
+        write_pretty(&stats, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
 
-        // Outbound connection should have → arrow.
-        assert!(output.contains("\u{2192}"));
+        assert!(output.contains("unknown"));
+        assert!(output.contains("-"));
     }
 }

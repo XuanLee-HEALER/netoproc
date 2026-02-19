@@ -218,8 +218,8 @@ servers, compute and report:
 
 ### FR-5: Snapshot Mode
 
-**FR-5.1**: Invoked via `sudo netop snapshot`. Collect all data for one complete
-polling cycle, emit to stdout, then exit.
+**FR-5.1**: Invoked via `sudo netoproc --duration <seconds>`. Collect per-process
+traffic data for the specified duration, emit to stdout, then exit.
 
 **FR-5.2**: Default output format: TSV (tab-separated values).
 
@@ -231,32 +231,25 @@ polling cycle, emit to stdout, then exit.
 - No output to stderr except error messages.
 - Suitable for piping to `awk`, `cut`, `sort`, `jq`, and other Unix text tools.
 
-**FR-5.5**: TSV schema — output is divided into sections, each preceded by a
-comment header line (prefixed with `#`), with a blank line between sections:
+**FR-5.5**: TSV schema — a single per-process traffic table:
 
 ```
-Section: processes
-Columns: pid, name, user, socket_count, connection_count, rx_bytes_sec, tx_bytes_sec, rx_bytes_total, tx_bytes_total
-
-Section: sockets
-Columns: pid, process, fd, proto, local_addr, state
-
-Section: connections
-Columns: pid, process, fd, proto, local_addr, remote_addr, direction, state, interface, rx_bytes_sec, tx_bytes_sec, rx_bytes_total, tx_bytes_total, rtt_us, jitter_us, retransmissions
-
-Section: interfaces
-Columns: name, ipv4_addr, ipv6_addr, status, rx_bytes_sec, tx_bytes_sec, rx_bytes_total, tx_bytes_total, rx_packets, tx_packets, rx_errors, tx_errors
-
-Section: dns_resolvers
-Columns: interface, server, avg_latency_ms, failure_rate_pct, query_count
-
-Section: dns_queries
-Columns: timestamp_ms, pid, process, query_name, query_type, response, latency_ms, resolver
+Columns: pid, process, rx_bytes, tx_bytes, rx_packets, tx_packets
 ```
 
-**FR-5.6**: JSON schema: a single root object matching the `SystemNetworkState`
-data model (see Section 7). All field names use snake_case. Arrays may be empty
-but must be present. Numeric values are JSON numbers (not strings).
+- Header row with column names, tab-separated
+- Data rows sorted by total traffic (rx_bytes + tx_bytes) descending
+- Unknown processes: pid = `-`, process = `unknown`
+- No section headers, no comment lines
+
+**FR-5.5a**: Pretty format (`--format pretty`): human-readable table with
+formatted byte sizes (B, KiB, MiB, GiB), column headers, and a TOTAL summary
+line.
+
+**FR-5.6**: JSON schema: a JSON array of per-process traffic objects. Each
+object has fields: `pid` (number or null), `process` (string), `rx_bytes`,
+`tx_bytes`, `rx_packets`, `tx_packets` (all numbers). Sorted by total traffic
+descending. All field names use snake_case.
 
 **FR-5.7**: Performance target: snapshot collection and output must complete
 within 2 seconds on a system with up to 500 processes and 5000 open sockets.
@@ -379,20 +372,18 @@ system libraries.
 
 ```
 USAGE:
-    sudo netop [OPTIONS] [COMMAND]
-
-COMMANDS:
-    monitor     Launch interactive TUI (default if no command specified)
-    snapshot    Capture current state and output to stdout
+    sudo netoproc [OPTIONS]
 
 OPTIONS:
-    --format <FORMAT>       Output format for snapshot mode [default: tsv]
-                            Possible values: tsv, json
-                            Ignored in monitor mode.
+    --duration <SECONDS>    Snapshot mode: collect for N seconds then output and exit.
+                            Without this flag, monitor (TUI) mode runs by default.
+                            Range: 1.0 to 3600.0
 
-    --interval <SECONDS>    Polling/refresh interval in seconds [default: 1.0]
-                            Range: 0.1 to 10.0
-                            Applies to both monitor and snapshot (collection time).
+    --monitor               Explicitly enter monitor (TUI) mode (default behavior).
+
+    --format <FORMAT>       Output format for snapshot mode [default: tsv]
+                            Possible values: tsv, json, pretty
+                            Ignored in monitor mode.
 
     --filter <PATTERN>      Filter output by pattern. Matches against process name,
                             remote address, or domain name. Case-insensitive
@@ -413,8 +404,8 @@ OPTIONS:
                             and disables DNS-related output sections.
 
     --bpf-buffer <BYTES>    BPF kernel buffer size in bytes.
-                            Default: 32768 (32 KB)
-                            Range: 4096 to 1048576 (4 KB to 1 MB)
+                            Default: 2097152 (2 MB)
+                            Range: 4096 to 16777216 (4 KB to 16 MB)
 
     --version               Print version information and exit.
     --help                  Print help message and exit.

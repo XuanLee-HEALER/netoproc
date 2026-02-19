@@ -16,8 +16,6 @@ const AF_INET6: i32 = 30;
 
 // Socket types
 const SOCK_STREAM: i32 = 1;
-#[allow(dead_code)]
-const SOCK_DGRAM: i32 = 2;
 
 // TCP states from the kernel
 const TCPS_CLOSED: i32 = 0;
@@ -457,6 +455,55 @@ fn extract_address(inp: &in_sockinfo, family: i32, is_local: bool) -> (Option<Ip
     };
 
     (addr, port)
+}
+
+/// Build a process table mapping normalized socket keys to process info.
+///
+/// Iterates all processes with network sockets and creates `SocketKey` entries
+/// for each socket that has both local and remote addresses.
+pub fn build_process_table() -> crate::model::traffic::ProcessTable {
+    use crate::model::traffic::{ProcessInfo, ProcessTable, SocketKey};
+
+    let mut table = ProcessTable::default();
+
+    let processes = match list_processes() {
+        Ok(procs) => procs,
+        Err(e) => {
+            log::warn!("build_process_table: list_processes failed: {e}");
+            return table;
+        }
+    };
+
+    for proc in &processes {
+        for sock in &proc.sockets {
+            let (local_addr, remote_addr) = match (sock.local_addr, sock.remote_addr) {
+                (Some(la), Some(ra)) => (la, ra),
+                _ => continue,
+            };
+
+            let proto = match sock.sock_type {
+                SOCK_STREAM => 6u8, // TCP
+                _ => 17u8,          // UDP
+            };
+
+            let key = SocketKey::new(
+                local_addr,
+                sock.local_port,
+                remote_addr,
+                sock.remote_port,
+                proto,
+            );
+            table.insert(
+                key,
+                ProcessInfo {
+                    pid: proc.pid,
+                    name: proc.name.clone(),
+                },
+            );
+        }
+    }
+
+    table
 }
 
 /// Convert kernel TCP state to our SocketState

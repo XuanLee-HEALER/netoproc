@@ -5,29 +5,42 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use crate::model::Protocol;
+use crate::model::{Direction, Protocol};
+
+use super::LinkType;
 
 // ---------------------------------------------------------------------------
 // FFI: BPF header as returned by /dev/bpfN reads
 // ---------------------------------------------------------------------------
 
-/// BPF packet header as defined in <net/bpf.h>.
+/// 32-bit timeval as used by the macOS kernel in `struct bpf_hdr`.
 ///
-/// On macOS arm64 (and x86_64 since 10.x), `timeval` is `{ i64, i64 }` = 16 bytes,
-/// so `bpf_hdr` is 16 + 4 + 4 + 2 + 2(padding) = 28 bytes.
+/// The kernel's `bpf_hdr` uses `struct timeval32` (`{int32_t, int32_t}` = 8 bytes),
+/// NOT the 64-bit `struct timeval` (`{long, int32_t}` = 16 bytes on 64-bit).
+/// This has been consistent across all macOS versions (XNU uses `timeval32` in
+/// `bsd/net/bpf.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct Timeval32 {
+    tv_sec: i32,
+    tv_usec: i32,
+}
+
+/// BPF packet header as defined in `<net/bpf.h>`.
+///
+/// Layout: `timeval32`(8) + `caplen`(4) + `datalen`(4) + `hdrlen`(2) = 18 bytes,
+/// padded to 20 bytes (4-byte alignment due to `u32` members).
 #[repr(C)]
 pub struct BpfHdr {
-    pub bh_tstamp: libc::timeval,
+    bh_tstamp: Timeval32,
     pub bh_caplen: u32,
     pub bh_datalen: u32,
     pub bh_hdrlen: u16,
 }
 
 // Compile-time size assertion.
-// macOS (both arm64 and x86_64) uses 64-bit timeval: {i64, i64} = 16 bytes.
-// bpf_hdr = timeval(16) + caplen(4) + datalen(4) + hdrlen(2) + padding(6) = 32.
-// The struct is padded to 8-byte alignment due to timeval's i64 members.
-const _: () = assert!(std::mem::size_of::<BpfHdr>() == 32);
+// bpf_hdr = timeval32(8) + caplen(4) + datalen(4) + hdrlen(2) + padding(2) = 20.
+const _: () = assert!(std::mem::size_of::<BpfHdr>() == 20);
 
 // ---------------------------------------------------------------------------
 // BPF_WORDALIGN — round up to next 4-byte boundary
@@ -99,6 +112,8 @@ pub struct PacketSummary {
     pub dst_port: u16,
     /// IP total length from the original (not captured) packet.
     pub ip_len: u16,
+    /// Packet direction relative to the local host.
+    pub direction: Direction,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,11 +127,16 @@ pub struct PacketSummary {
 pub struct BpfPacketIter<'a> {
     buf: &'a [u8],
     pos: usize,
+    link_type: LinkType,
 }
 
 impl<'a> BpfPacketIter<'a> {
-    pub fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+    pub fn new(buf: &'a [u8], link_type: LinkType) -> Self {
+        Self {
+            buf,
+            pos: 0,
+            link_type,
+        }
     }
 }
 
@@ -147,7 +167,7 @@ impl<'a> Iterator for BpfPacketIter<'a> {
             let pkt_data = &self.buf[self.pos + hdr_len..self.pos + hdr_len + cap_len];
             self.pos += bpf_wordalign(hdr_len + cap_len);
 
-            if let Some(mut summary) = parse_single_packet(pkt_data) {
+            if let Some(mut summary) = parse_single_packet(pkt_data, self.link_type) {
                 summary.timestamp = (tv_sec as u64)
                     .saturating_mul(1_000_000)
                     .saturating_add(tv_usec as u64);
@@ -165,24 +185,36 @@ impl<'a> Iterator for BpfPacketIter<'a> {
 /// are silently skipped.
 ///
 /// This is a convenience wrapper around [`BpfPacketIter`].
-pub fn parse_bpf_buffer(buf: &[u8]) -> Vec<PacketSummary> {
-    BpfPacketIter::new(buf).collect()
+pub fn parse_bpf_buffer(buf: &[u8], link_type: LinkType) -> Vec<PacketSummary> {
+    BpfPacketIter::new(buf, link_type).collect()
 }
 
 // ---------------------------------------------------------------------------
 // Single-packet parsing
 // ---------------------------------------------------------------------------
 
-/// Parses a single raw packet (starting from the Ethernet header) into a
-/// [`PacketSummary`].
+/// Parses a single raw packet into a [`PacketSummary`].
+///
+/// The `link_type` determines how the link-layer header is interpreted:
+/// - [`LinkType::Ethernet`]: 14-byte Ethernet header, EtherType at offset 12
+/// - [`LinkType::Raw`]: no link-layer header, IP version from first nibble
+/// - [`LinkType::Null`]: 4-byte AF header in host byte order
 ///
 /// Returns `None` if the packet is:
 /// - Too short (truncated at any layer)
 /// - Not IPv4 or IPv6 (e.g. ARP, VLAN-tagged)
 /// - A non-first IPv4 fragment
 /// - Using an unsupported transport protocol
-pub fn parse_single_packet(data: &[u8]) -> Option<PacketSummary> {
-    // --- Layer 2: Ethernet ---
+pub fn parse_single_packet(data: &[u8], link_type: LinkType) -> Option<PacketSummary> {
+    match link_type {
+        LinkType::Ethernet => parse_ethernet_frame(data),
+        LinkType::Raw => parse_raw_frame(data),
+        LinkType::Null => parse_null_frame(data),
+    }
+}
+
+/// Parse an Ethernet-framed packet (DLT_EN10MB).
+fn parse_ethernet_frame(data: &[u8]) -> Option<PacketSummary> {
     if data.len() < ETH_HLEN {
         return None;
     }
@@ -192,6 +224,33 @@ pub fn parse_single_packet(data: &[u8]) -> Option<PacketSummary> {
     match ethertype {
         ETHERTYPE_IPV4 => parse_ipv4(l3_data),
         ETHERTYPE_IPV6 => parse_ipv6(l3_data),
+        _ => None,
+    }
+}
+
+/// Parse a raw IP packet (DLT_RAW) — no link-layer header.
+fn parse_raw_frame(data: &[u8]) -> Option<PacketSummary> {
+    if data.is_empty() {
+        return None;
+    }
+    let version = data[0] >> 4;
+    match version {
+        4 => parse_ipv4(data),
+        6 => parse_ipv6(data),
+        _ => None,
+    }
+}
+
+/// Parse a DLT_NULL framed packet — 4-byte AF header in host byte order.
+fn parse_null_frame(data: &[u8]) -> Option<PacketSummary> {
+    if data.len() < 4 {
+        return None;
+    }
+    let af = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+    let l3_data = &data[4..];
+    match af {
+        af if af == libc::AF_INET as u32 => parse_ipv4(l3_data),
+        af if af == libc::AF_INET6 as u32 => parse_ipv6(l3_data),
         _ => None,
     }
 }
@@ -343,6 +402,7 @@ fn parse_l4(
                 dst_ip,
                 dst_port,
                 ip_len,
+                direction: Direction::Outbound,
             })
         }
         PROTO_ICMP | PROTO_ICMPV6 => Some(PacketSummary {
@@ -353,6 +413,7 @@ fn parse_l4(
             dst_ip,
             dst_port: 0,
             ip_len,
+            direction: Direction::Outbound,
         }),
         _ => None,
     }
@@ -457,12 +518,6 @@ mod tests {
 
         fn fragment_offset(mut self, offset: u16) -> Self {
             self.fragment_offset = offset;
-            self
-        }
-
-        #[allow(dead_code)]
-        fn l4_payload(mut self, payload: Vec<u8>) -> Self {
-            self.l4_payload = payload;
             self
         }
 
@@ -638,7 +693,7 @@ mod tests {
             .ports(54321, 443)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -661,7 +716,7 @@ mod tests {
             .ports(12345, 53)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Udp);
@@ -687,7 +742,7 @@ mod tests {
             .ports(10000, 8080)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -713,7 +768,7 @@ mod tests {
             .ports(5353, 5353)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Udp);
@@ -739,7 +794,7 @@ mod tests {
             .ip_options(options)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -763,7 +818,7 @@ mod tests {
             .ip_options(options)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Udp);
@@ -779,7 +834,7 @@ mod tests {
     #[test]
     fn ut_2_7_truncated_less_than_ethernet() {
         let data = vec![0u8; 10];
-        assert!(parse_single_packet(&data).is_none());
+        assert!(parse_single_packet(&data, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -795,7 +850,7 @@ mod tests {
         data[13] = 0x00;
         // Set version+IHL byte for IPv4 (version=4, IHL=5)
         data[14] = 0x45;
-        assert!(parse_single_packet(&data).is_none());
+        assert!(parse_single_packet(&data, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -812,7 +867,7 @@ mod tests {
 
         // ETH(14) + IPv4(20) + 2 bytes of TCP (not enough for ports)
         let truncated = &full_pkt[..14 + 20 + 2];
-        assert!(parse_single_packet(truncated).is_none());
+        assert!(parse_single_packet(truncated, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -822,7 +877,7 @@ mod tests {
     fn ut_2_10_arp_ethertype() {
         let pkt = PacketBuilder::new().ethertype(0x0806).build();
 
-        assert!(parse_single_packet(&pkt).is_none());
+        assert!(parse_single_packet(&pkt, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -834,7 +889,7 @@ mod tests {
             .ethertype(0x8100) // 802.1Q VLAN tag
             .build();
 
-        assert!(parse_single_packet(&pkt).is_none());
+        assert!(parse_single_packet(&pkt, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -847,7 +902,7 @@ mod tests {
             .protocol(PROTO_ICMP)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Icmp);
@@ -870,7 +925,7 @@ mod tests {
             .fragment_offset(185) // non-zero fragment offset
             .build();
 
-        assert!(parse_single_packet(&pkt).is_none());
+        assert!(parse_single_packet(&pkt, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -886,7 +941,7 @@ mod tests {
             .build();
 
         assert_eq!(pkt.len(), 54);
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -911,12 +966,13 @@ mod tests {
         let hdr_len = std::mem::size_of::<BpfHdr>() as u16;
         let cap_len = pkt.len() as u32;
 
-        // Build a BPF buffer with one record.
+        // Build a BPF buffer with one record matching the kernel's bpf_hdr layout.
+        // The kernel uses timeval32 {i32 tv_sec, i32 tv_usec} = 8 bytes.
         let mut buf = Vec::new();
 
-        // bh_tstamp: tv_sec=1000, tv_usec=500
-        let tv_sec: i64 = 1000;
-        let tv_usec: i64 = 500;
+        // bh_tstamp: tv_sec=1000, tv_usec=500 (timeval32: two i32 fields)
+        let tv_sec: i32 = 1000;
+        let tv_usec: i32 = 500;
         buf.extend_from_slice(&tv_sec.to_ne_bytes());
         buf.extend_from_slice(&tv_usec.to_ne_bytes());
         // bh_caplen
@@ -925,14 +981,14 @@ mod tests {
         buf.extend_from_slice(&cap_len.to_ne_bytes());
         // bh_hdrlen
         buf.extend_from_slice(&hdr_len.to_ne_bytes());
-        // Pad to hdr_len (there might be 2 bytes of struct padding already included)
+        // Pad to hdr_len
         while buf.len() < hdr_len as usize {
             buf.push(0);
         }
         // Append packet data
         buf.extend_from_slice(&pkt);
 
-        let results = parse_bpf_buffer(&buf);
+        let results = parse_bpf_buffer(&buf, LinkType::Ethernet);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].timestamp, 1000 * 1_000_000 + 500);
         assert_eq!(results[0].protocol, Protocol::Tcp);
@@ -942,13 +998,13 @@ mod tests {
 
     #[test]
     fn test_parse_bpf_buffer_empty() {
-        let results = parse_bpf_buffer(&[]);
+        let results = parse_bpf_buffer(&[], LinkType::Ethernet);
         assert!(results.is_empty());
     }
 
     /// Helper: wrap a raw packet into a BPF buffer record (BpfHdr + packet data),
-    /// appending to `buf`.
-    fn append_bpf_record(buf: &mut Vec<u8>, pkt: &[u8], tv_sec: i64, tv_usec: i64) {
+    /// appending to `buf`. Uses timeval32 layout matching the macOS kernel.
+    fn append_bpf_record(buf: &mut Vec<u8>, pkt: &[u8], tv_sec: i32, tv_usec: i32) {
         let hdr_len = std::mem::size_of::<BpfHdr>() as u16;
         let cap_len = pkt.len() as u32;
         let record_start = buf.len();
@@ -988,7 +1044,7 @@ mod tests {
         append_bpf_record(&mut buf, &tcp_pkt, 1000, 0);
         append_bpf_record(&mut buf, &udp_pkt, 2000, 500);
 
-        let mut iter = BpfPacketIter::new(&buf);
+        let mut iter = BpfPacketIter::new(&buf, LinkType::Ethernet);
         let first = iter.next().expect("should yield TCP packet");
         assert_eq!(first.protocol, Protocol::Tcp);
         assert_eq!(first.src_port, 8080);
@@ -1027,7 +1083,7 @@ mod tests {
             .protocol(PROTO_ICMPV6)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some());
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Icmp);
@@ -1047,7 +1103,7 @@ mod tests {
             .protocol(47) // GRE
             .build();
 
-        assert!(parse_single_packet(&pkt).is_none());
+        assert!(parse_single_packet(&pkt, LinkType::Ethernet).is_none());
     }
 
     // -----------------------------------------------------------------------
@@ -1083,7 +1139,7 @@ mod tests {
             .ipv6_ext_header(hdr_type, raw)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some(), "should parse IPv6 with Hop-by-Hop + TCP");
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -1104,7 +1160,7 @@ mod tests {
             .ipv6_ext_header(hdr_type, raw)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some(), "should parse IPv6 with Routing + UDP");
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Udp);
@@ -1125,7 +1181,7 @@ mod tests {
             .ipv6_ext_header(hdr_type, raw)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(result.is_some(), "should parse IPv6 with Fragment + TCP");
         let s = result.unwrap();
         assert_eq!(s.protocol, Protocol::Tcp);
@@ -1148,7 +1204,7 @@ mod tests {
             .ipv6_ext_header(rt_type, rt_raw)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(
             result.is_some(),
             "should parse IPv6 with Hop-by-Hop + Routing + TCP"
@@ -1172,7 +1228,7 @@ mod tests {
             .ipv6_ext_header(hdr_type, raw)
             .build();
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         assert!(
             result.is_some(),
             "should parse IPv6 with Dest Options + UDP"
@@ -1209,7 +1265,7 @@ mod tests {
         // Truncated Hop-by-Hop: only 4 bytes (needs 8)
         pkt.extend_from_slice(&[PROTO_TCP, 0, 0, 0]);
 
-        let result = parse_single_packet(&pkt);
+        let result = parse_single_packet(&pkt, LinkType::Ethernet);
         // Should fail because extension header is truncated and we can't reach L4
         assert!(
             result.is_none(),

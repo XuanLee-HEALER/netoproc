@@ -80,16 +80,23 @@ series of `ioctl` calls in strict order:
 
 1. **BIOCSBLEN** — Set kernel buffer size (before bind)
 2. **BIOCSETIF** — Bind to a network interface
-3. **BIOCIMMEDIATE** — Enable immediate mode
-4. **BIOCSRTIMEOUT** — Set read timeout (500ms)
-5. **BIOCSETF** — Install packet filter program
-6. **BIOCPROMISC** — Enable promiscuous mode (non-fatal)
-7. **BIOCGBLEN** — Read back actual buffer size
+3. **BIOCSRTIMEOUT** — Set read timeout (500ms)
+4. **BIOCSETF** — Install packet filter program
+5. **BIOCPROMISC** — Enable promiscuous mode (non-fatal)
+6. **BIOCGBLEN** — Read back actual buffer size
 
 The order matters: `BIOCSBLEN` must come before
 `BIOCSETIF`. The kernel may silently adjust the buffer
 size, so we always read back with `BIOCGBLEN` to
 allocate the correct userspace buffer.
+
+> **v0.2.0 change**: `BIOCIMMEDIATE` is no longer set.
+> Without it, the kernel buffers packets until the read
+> timeout (500ms) fires or the buffer fills, whichever
+> comes first. This reduces the number of small reads
+> and better matches the streaming batch architecture.
+> The default buffer size has been increased from 32 KB
+> to **2 MB** to accommodate the 500ms batching window.
 
 ### Buffer Size Guard
 
@@ -574,7 +581,7 @@ traffic capture device because:
 | `BpfPacketIter`         | No intermediate Vec    |
 | TCP/UDP protocol filter | Less kernel-user data  |
 | 500ms read timeout      | Graceful shutdown      |
-| `BPF_IMMEDIATE` mode    | No buffering delay     |
+| 2 MB default buffer     | 500ms batching window  |
 
 ### Why Not eBPF?
 

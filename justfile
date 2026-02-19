@@ -53,7 +53,7 @@ run *args:
 
 # Run netoproc in snapshot mode (requires sudo)
 run-snapshot *args:
-    sudo cargo run -- snapshot {{args}}
+    sudo cargo run -- --duration 5 {{args}}
 
 # Generate and open documentation
 doc:

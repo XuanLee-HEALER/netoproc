@@ -217,8 +217,8 @@ pub fn correlate(
 
                 let remote_addr_str = format_addr_port(Some(remote_addr), sock.remote_port);
 
-                // Look up previous state for this connection to preserve time series
-                let (prev_rx_ts, prev_tx_ts, prev_rx_total, prev_tx_total) =
+                // Look up previous totals for this connection
+                let (prev_rx_total, prev_tx_total) =
                     find_prev_connection(prev_state, proc.pid, sock.fd, &remote_addr_str);
 
                 let rx = bytes_rx.get(&tuple).copied().unwrap_or(0);
@@ -227,31 +227,25 @@ pub fn correlate(
                 let rx_total = prev_rx_total + rx;
                 let tx_total = prev_tx_total + tx;
 
-                let mut rx_ts = prev_rx_ts;
-                let mut tx_ts = prev_tx_ts;
-                rx_ts.push_sample(rx);
-                tx_ts.push_sample(tx);
-
+                // Rate = bytes captured this tick (tick interval ~1s in monitor mode)
                 let rx_rate = RateMetrics {
-                    bytes_per_sec: rx_ts.rate_per_sec(),
-                    bytes_per_min: rx_ts.rate_per_sec() * 60.0,
+                    bytes_per_sec: rx as f64,
+                    bytes_per_min: rx as f64 * 60.0,
                 };
                 let tx_rate = RateMetrics {
-                    bytes_per_sec: tx_ts.rate_per_sec(),
-                    bytes_per_min: tx_ts.rate_per_sec() * 60.0,
+                    bytes_per_sec: tx as f64,
+                    bytes_per_min: tx as f64 * 60.0,
                 };
 
                 socket_entry.connections.push(Connection {
                     remote_addr: remote_addr_str,
                     direction,
-                    interface: String::new(), // TODO: derive from interface index
+                    interface: String::new(),
                     rx_rate,
                     tx_rate,
                     rx_bytes_total: rx_total,
                     tx_bytes_total: tx_total,
                     stability: None,
-                    rx_timeseries: rx_ts,
-                    tx_timeseries: tx_ts,
                 });
             }
         }
@@ -363,14 +357,7 @@ fn find_prev_connection(
     pid: u32,
     fd: i32,
     remote_addr: &str,
-) -> (
-    crate::model::timeseries::AggregatedTimeSeries,
-    crate::model::timeseries::AggregatedTimeSeries,
-    u64,
-    u64,
-) {
-    use crate::model::timeseries::AggregatedTimeSeries;
-
+) -> (u64, u64) {
     for proc in &prev_state.processes {
         if proc.pid != pid {
             continue;
@@ -381,23 +368,13 @@ fn find_prev_connection(
             }
             for conn in &sock.connections {
                 if conn.remote_addr == remote_addr {
-                    return (
-                        conn.rx_timeseries.clone(),
-                        conn.tx_timeseries.clone(),
-                        conn.rx_bytes_total,
-                        conn.tx_bytes_total,
-                    );
+                    return (conn.rx_bytes_total, conn.tx_bytes_total);
                 }
             }
         }
     }
 
-    (
-        AggregatedTimeSeries::new(),
-        AggregatedTimeSeries::new(),
-        0,
-        0,
-    )
+    (0, 0)
 }
 
 fn build_interfaces(
@@ -408,21 +385,15 @@ fn build_interfaces(
     let mut interfaces = Vec::new();
 
     for raw in raw_interfaces {
-        // Find previous interface state for time series continuity
+        // Find previous interface state for rate computation
         let prev = prev_state.interfaces.iter().find(|i| i.name == raw.name);
 
-        let mut rx_ts = prev.map(|p| p.rx_timeseries.clone()).unwrap_or_default();
-        let mut tx_ts = prev.map(|p| p.tx_timeseries.clone()).unwrap_or_default();
-
-        // Compute delta from previous totals
+        // Compute delta from previous totals (rate = delta per tick, ~1s interval)
         let prev_rx = prev.map(|p| p.rx_bytes_total).unwrap_or(0);
         let prev_tx = prev.map(|p| p.tx_bytes_total).unwrap_or(0);
 
         let rx_delta = raw.ifi_ibytes.saturating_sub(prev_rx);
         let tx_delta = raw.ifi_obytes.saturating_sub(prev_tx);
-
-        rx_ts.push_sample(rx_delta);
-        tx_ts.push_sample(tx_delta);
 
         // Find DNS servers for this interface
         let mut dns_servers = Vec::new();
@@ -447,16 +418,14 @@ fn build_interfaces(
             dns_servers,
             search_domains,
             status,
-            rx_bytes_rate: rx_ts.rate_per_sec(),
-            tx_bytes_rate: tx_ts.rate_per_sec(),
+            rx_bytes_rate: rx_delta as f64,
+            tx_bytes_rate: tx_delta as f64,
             rx_bytes_total: raw.ifi_ibytes,
             tx_bytes_total: raw.ifi_obytes,
             rx_packets: raw.ifi_ipackets,
             tx_packets: raw.ifi_opackets,
             rx_errors: raw.ifi_ierrors,
             tx_errors: raw.ifi_oerrors,
-            rx_timeseries: rx_ts,
-            tx_timeseries: tx_ts,
         });
     }
 
@@ -582,6 +551,7 @@ mod tests {
             dst_ip,
             dst_port,
             ip_len,
+            direction: Direction::Outbound,
         }
     }
 
@@ -848,19 +818,19 @@ mod tests {
         assert_eq!(state.dns.resolvers[1].server, "8.8.4.4");
     }
 
-    // UT-6.10: Time series preserved across state transitions
+    // UT-6.10: Cumulative totals preserved across state transitions
     #[test]
-    fn ut_6_10_timeseries_preserved() {
+    fn ut_6_10_totals_preserved() {
         let sock = make_raw_socket(3, 12345, 80, Some(4));
-        let proc = make_raw_process(100, "curl", vec![sock.clone()]);
 
         let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
         let remote = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
 
         // First tick: 1000 bytes RX
+        let proc1 = make_raw_process(100, "curl", vec![sock.clone()]);
         let pkt1 = make_packet(remote, 80, local, 12345, 1000);
         let state1 = correlate(
-            &[proc.clone()],
+            std::slice::from_ref(&proc1),
             &[],
             &[],
             &[],

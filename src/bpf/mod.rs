@@ -28,21 +28,65 @@ const IOC_INOUT: u32 = IOC_IN | IOC_OUT;
 const BIOCSBLEN: libc::c_ulong = ioc(IOC_INOUT, b'B', 102, 4); // _IOWR('B', 102, u_int)
 const BIOCSETIF: libc::c_ulong = ioc(IOC_IN, b'B', 108, 32); // _IOW('B', 108, ifreq)
 const BIOCSETF: libc::c_ulong = ioc(IOC_IN, b'B', 103, 16); // _IOW('B', 103, bpf_program) — 16 bytes on 64-bit
-const BIOCIMMEDIATE: libc::c_ulong = ioc(IOC_IN, b'B', 112, 4); // _IOW('B', 112, u_int)
 const BIOCPROMISC: libc::c_ulong = ioc(IOC_VOID, b'B', 105, 0); // _IO('B', 105)
 const BIOCGSTATS: libc::c_ulong = ioc(IOC_OUT, b'B', 111, 8); // _IOR('B', 111, bpf_stat)
 const BIOCGBLEN: libc::c_ulong = ioc(IOC_OUT, b'B', 102, 4); // _IOR('B', 102, u_int)
 const BIOCSRTIMEOUT: libc::c_ulong = ioc(IOC_IN, b'B', 109, 16); // _IOW('B', 109, struct timeval)
+const BIOCGDLT: libc::c_ulong = ioc(IOC_OUT, b'B', 106, 4); // _IOR('B', 106, u_int)
 
 // Compile-time verification against known macOS ioctl values.
 const _: () = assert!(BIOCSBLEN == 0xC004_4266);
 const _: () = assert!(BIOCSETIF == 0x8020_426C);
 const _: () = assert!(BIOCSETF == 0x8010_4267);
-const _: () = assert!(BIOCIMMEDIATE == 0x8004_4270);
 const _: () = assert!(BIOCPROMISC == 0x2000_4269);
 const _: () = assert!(BIOCGSTATS == 0x4008_426F);
 const _: () = assert!(BIOCGBLEN == 0x4004_4266);
 const _: () = assert!(BIOCSRTIMEOUT == 0x8010_426D);
+const _: () = assert!(BIOCGDLT == 0x4004_426A);
+
+// ---------------------------------------------------------------------------
+// Data link type (DLT) support
+// ---------------------------------------------------------------------------
+
+const DLT_NULL: u32 = 0; // BSD loopback (4-byte AF header)
+const DLT_EN10MB: u32 = 1; // Ethernet
+const DLT_RAW: u32 = 12; // Raw IP (no link-layer header)
+
+/// Data link type of a BPF capture device.
+///
+/// Determines the link-layer framing used by the interface, which affects
+/// both the BPF filter program and the packet parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkType {
+    /// Ethernet (DLT_EN10MB = 1): 14-byte header, EtherType at offset 12.
+    Ethernet,
+    /// Raw IP (DLT_RAW = 12): no link-layer header, IP starts at offset 0.
+    /// Used by macOS `utun*` (tunnel) interfaces.
+    Raw,
+    /// Null/Loopback (DLT_NULL = 0): 4-byte AF header in host byte order.
+    /// Used by macOS `lo0`.
+    Null,
+}
+
+impl LinkType {
+    fn from_dlt(dlt: u32) -> Option<Self> {
+        match dlt {
+            DLT_EN10MB => Some(Self::Ethernet),
+            DLT_RAW => Some(Self::Raw),
+            DLT_NULL => Some(Self::Null),
+            _ => None,
+        }
+    }
+}
+
+/// Type of BPF filter to install on a capture device.
+#[derive(Debug, Clone, Copy)]
+pub enum FilterKind {
+    /// Accept all IPv4/IPv6 TCP/UDP traffic.
+    Traffic,
+    /// Accept only DNS traffic (port 53).
+    Dns,
+}
 
 // ---------------------------------------------------------------------------
 // bpf_program FFI struct for BIOCSETF
@@ -80,11 +124,20 @@ pub struct BpfCapture {
     fd: OwnedFd,
     buffer: Vec<u8>,
     interface: String,
+    link_type: LinkType,
 }
 
 impl BpfCapture {
     /// Open a BPF device, bind to `interface`, and configure for capture.
-    pub fn new(interface: &str, buffer_size: u32, filter: &[bpf_insn]) -> Result<Self, NetopError> {
+    ///
+    /// The `filter_kind` determines which BPF filter program to install. The
+    /// actual filter instructions are selected based on the interface's data
+    /// link type (DLT), which is detected after binding.
+    pub fn new(
+        interface: &str,
+        buffer_size: u32,
+        filter_kind: FilterKind,
+    ) -> Result<Self, NetopError> {
         let fd = open_bpf_device()?;
 
         // 1. Set buffer size (minimum 4096 to avoid undefined behavior with tiny values)
@@ -94,11 +147,16 @@ impl BpfCapture {
         // 2. Bind to interface
         set_interface(&fd, interface)?;
 
-        // 3. Enable immediate mode (return packets without waiting for full buffer)
-        let imm: u32 = 1;
-        ioctl_set(&fd, BIOCIMMEDIATE, &imm)?;
+        // 3. Detect data link type (must be after BIOCSETIF)
+        let mut dlt: u32 = 0;
+        ioctl_get(&fd, BIOCGDLT, &mut dlt)?;
+        let link_type = LinkType::from_dlt(dlt).ok_or_else(|| {
+            NetopError::BpfDevice(format!(
+                "unsupported data link type {dlt} on interface {interface}"
+            ))
+        })?;
 
-        // 3b. Set read timeout so blocking reads return periodically,
+        // 4. Set read timeout so blocking reads return periodically,
         // allowing threads to check shutdown signals.
         let timeout = libc::timeval {
             tv_sec: 0,
@@ -106,10 +164,18 @@ impl BpfCapture {
         };
         ioctl_set(&fd, BIOCSRTIMEOUT, &timeout)?;
 
-        // 4. Install BPF filter
-        set_filter(&fd, filter)?;
+        // 5. Install BPF filter (selected based on DLT and filter kind)
+        let filter_insns = match (filter_kind, link_type) {
+            (FilterKind::Traffic, LinkType::Ethernet) => filter::traffic_filter(),
+            (FilterKind::Traffic, LinkType::Raw) => filter::traffic_filter_raw(),
+            (FilterKind::Traffic, LinkType::Null) => filter::traffic_filter_null(),
+            (FilterKind::Dns, LinkType::Ethernet) => filter::dns_filter(),
+            (FilterKind::Dns, LinkType::Raw) => filter::dns_filter_raw(),
+            (FilterKind::Dns, LinkType::Null) => filter::dns_filter_null(),
+        };
+        set_filter(&fd, &filter_insns)?;
 
-        // 5. Enable promiscuous mode
+        // 6. Enable promiscuous mode
         unsafe {
             if libc::ioctl(fd.as_raw_fd(), BIOCPROMISC) != 0 {
                 let err = io::Error::last_os_error();
@@ -122,16 +188,25 @@ impl BpfCapture {
             }
         }
 
-        // 6. Read back actual buffer size
+        // 7. Read back actual buffer size
         let mut actual_blen: u32 = 0;
         ioctl_get(&fd, BIOCGBLEN, &mut actual_blen)?;
 
         let buffer = vec![0u8; actual_blen as usize];
 
+        log::info!(
+            "BPF capture on {} (DLT={}, {:?}, buffer={})",
+            interface,
+            dlt,
+            link_type,
+            actual_blen
+        );
+
         Ok(Self {
             fd,
             buffer,
             interface: interface.to_string(),
+            link_type,
         })
     }
 
@@ -141,6 +216,15 @@ impl BpfCapture {
     /// The caller should reuse the same `Vec` across calls to avoid repeated
     /// heap allocation.
     pub fn read_packets(&mut self, out: &mut Vec<PacketSummary>) -> Result<(), NetopError> {
+        self.read_packets_raw(out).map(|_| ())
+    }
+
+    /// Blocking read of packets from the BPF device, returning raw byte count.
+    ///
+    /// Returns the number of raw bytes returned by the kernel `read()` call.
+    /// This is useful for diagnostics: 0 means timeout with no data,
+    /// positive means data was read (check `out` for parsed packet count).
+    pub fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError> {
         out.clear();
 
         let n = unsafe {
@@ -160,45 +244,20 @@ impl BpfCapture {
         }
 
         if n == 0 {
-            return Ok(());
+            return Ok(0);
         }
 
-        out.extend(packet::BpfPacketIter::new(&self.buffer[..n as usize]));
-        Ok(())
+        out.extend(packet::BpfPacketIter::new(
+            &self.buffer[..n as usize],
+            self.link_type,
+        ));
+        Ok(n as usize)
     }
 
     /// Extract DNS payload from a raw packet if it's on port 53.
     /// Returns the UDP/TCP payload suitable for `dns::parse_dns()`.
-    pub fn extract_dns_payload(packet_data: &[u8]) -> Option<&[u8]> {
-        // Packet data starts after BPF header, at the Ethernet frame.
-        if packet_data.len() < 14 {
-            return None;
-        }
-
-        let ethertype = u16::from_be_bytes([packet_data[12], packet_data[13]]);
-        let (ip_hdr_start, ip_hdr_len, protocol) = match ethertype {
-            0x0800 => {
-                // IPv4
-                if packet_data.len() < 14 + 20 {
-                    return None;
-                }
-                let ihl = (packet_data[14] & 0x0F) as usize * 4;
-                let proto = packet_data[23];
-                (14, ihl, proto)
-            }
-            0x86DD => {
-                // IPv6
-                if packet_data.len() < 14 + 40 {
-                    return None;
-                }
-                let next_hdr = packet_data[20];
-                let after_fixed = &packet_data[14 + 40..];
-                let (final_proto, ext_offset) =
-                    packet::skip_ipv6_extension_headers(next_hdr, after_fixed);
-                (14, 40 + ext_offset, final_proto)
-            }
-            _ => return None,
-        };
+    fn extract_dns_payload(packet_data: &[u8], link_type: LinkType) -> Option<&[u8]> {
+        let (ip_hdr_start, ip_hdr_len, protocol) = Self::identify_ip_layer(packet_data, link_type)?;
 
         let l4_start = ip_hdr_start + ip_hdr_len;
 
@@ -246,6 +305,96 @@ impl BpfCapture {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// Identify the IP layer start, header length, and protocol from a raw frame.
+    ///
+    /// Returns `(ip_start_offset, ip_header_length, protocol)` or `None` if
+    /// the frame is not IPv4/IPv6.
+    fn identify_ip_layer(data: &[u8], link_type: LinkType) -> Option<(usize, usize, u8)> {
+        match link_type {
+            LinkType::Ethernet => {
+                if data.len() < 14 {
+                    return None;
+                }
+                let ethertype = u16::from_be_bytes([data[12], data[13]]);
+                match ethertype {
+                    0x0800 => {
+                        if data.len() < 14 + 20 {
+                            return None;
+                        }
+                        let ihl = (data[14] & 0x0F) as usize * 4;
+                        let proto = data[14 + 9];
+                        Some((14, ihl, proto))
+                    }
+                    0x86DD => {
+                        if data.len() < 14 + 40 {
+                            return None;
+                        }
+                        let next_hdr = data[14 + 6];
+                        let after_fixed = &data[14 + 40..];
+                        let (final_proto, ext_offset) =
+                            packet::skip_ipv6_extension_headers(next_hdr, after_fixed);
+                        Some((14, 40 + ext_offset, final_proto))
+                    }
+                    _ => None,
+                }
+            }
+            LinkType::Raw => {
+                if data.is_empty() {
+                    return None;
+                }
+                let version = data[0] >> 4;
+                match version {
+                    4 => {
+                        if data.len() < 20 {
+                            return None;
+                        }
+                        let ihl = (data[0] & 0x0F) as usize * 4;
+                        let proto = data[9];
+                        Some((0, ihl, proto))
+                    }
+                    6 => {
+                        if data.len() < 40 {
+                            return None;
+                        }
+                        let next_hdr = data[6];
+                        let after_fixed = &data[40..];
+                        let (final_proto, ext_offset) =
+                            packet::skip_ipv6_extension_headers(next_hdr, after_fixed);
+                        Some((0, 40 + ext_offset, final_proto))
+                    }
+                    _ => None,
+                }
+            }
+            LinkType::Null => {
+                if data.len() < 4 {
+                    return None;
+                }
+                let af = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+                match af {
+                    af if af == libc::AF_INET as u32 => {
+                        if data.len() < 4 + 20 {
+                            return None;
+                        }
+                        let ihl = (data[4] & 0x0F) as usize * 4;
+                        let proto = data[4 + 9];
+                        Some((4, ihl, proto))
+                    }
+                    af if af == libc::AF_INET6 as u32 => {
+                        if data.len() < 4 + 40 {
+                            return None;
+                        }
+                        let next_hdr = data[4 + 6];
+                        let after_fixed = &data[4 + 40..];
+                        let (final_proto, ext_offset) =
+                            packet::skip_ipv6_extension_headers(next_hdr, after_fixed);
+                        Some((4, 40 + ext_offset, final_proto))
+                    }
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -301,7 +450,7 @@ impl BpfCapture {
 
             let frame = &buf[offset + hdr_len..offset + hdr_len + cap_len];
 
-            if let Some(dns_payload) = Self::extract_dns_payload(frame) {
+            if let Some(dns_payload) = Self::extract_dns_payload(frame, self.link_type) {
                 match dns::parse_dns(dns_payload) {
                     Ok(msg) => messages.push(msg),
                     Err(e) => log::debug!("DNS parse error: {e}"),
@@ -427,11 +576,14 @@ mod tests {
     #[test]
     fn ut_bpf_buffer_min_guard() {
         // Verify the clamping logic: buffer_size.max(4096)
-        assert_eq!(0u32.max(4096), 4096);
-        assert_eq!(1u32.max(4096), 4096);
-        assert_eq!(4095u32.max(4096), 4096);
-        assert_eq!(4096u32.max(4096), 4096);
-        assert_eq!(8192u32.max(4096), 8192);
-        assert_eq!(u32::MAX.max(4096), u32::MAX);
+        fn clamp(v: u32) -> u32 {
+            v.max(4096)
+        }
+        assert_eq!(clamp(0), 4096);
+        assert_eq!(clamp(1), 4096);
+        assert_eq!(clamp(4095), 4096);
+        assert_eq!(clamp(4096), 4096);
+        assert_eq!(clamp(8192), 8192);
+        assert_eq!(clamp(u32::MAX), u32::MAX);
     }
 }
