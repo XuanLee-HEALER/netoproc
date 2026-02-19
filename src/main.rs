@@ -33,8 +33,14 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
 
 fn install_signal_handlers() {
     unsafe {
-        libc::signal(libc::SIGTERM, signal_handler as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGINT, signal_handler as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            signal_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            signal_handler as *const () as libc::sighandler_t,
+        );
     }
 }
 
@@ -272,7 +278,10 @@ fn run_snapshot(
     log::info!(
         "After drain: {} processes, {} total entries",
         stats.len(),
-        stats.values().map(|s| s.rx_packets + s.tx_packets).sum::<u64>()
+        stats
+            .values()
+            .map(|s| s.rx_packets + s.tx_packets)
+            .sum::<u64>()
     );
 
     // Output results.
@@ -465,10 +474,7 @@ fn bpf_capture_loop(
                 if pkt_buf.is_empty() {
                     // read() returned data but parser produced no packets.
                     parse_empty_count += 1;
-                    log::debug!(
-                        "BPF {}: read {} bytes, parsed 0 packets",
-                        iface, n
-                    );
+                    log::debug!("BPF {}: read {} bytes, parsed 0 packets", iface, n);
                 } else {
                     total_packets += pkt_buf.len() as u64;
                     // Set direction based on local IPs.
@@ -498,7 +504,12 @@ fn bpf_capture_loop(
                             Err(mpsc::TrySendError::Disconnected(_)) => {
                                 log::info!(
                                     "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
-                                    iface, eagain_count, empty_ok_count, data_read_count, parse_empty_count, total_packets
+                                    iface,
+                                    eagain_count,
+                                    empty_ok_count,
+                                    data_read_count,
+                                    parse_empty_count,
+                                    total_packets
                                 );
                                 return;
                             }
@@ -521,11 +532,23 @@ fn bpf_capture_loop(
     match cap.stats() {
         Ok(st) => log::info!(
             "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}, kernel_recv={}, kernel_drop={}",
-            iface, eagain_count, empty_ok_count, data_read_count, parse_empty_count, total_packets, st.received, st.dropped
+            iface,
+            eagain_count,
+            empty_ok_count,
+            data_read_count,
+            parse_empty_count,
+            total_packets,
+            st.received,
+            st.dropped
         ),
         Err(_) => log::info!(
             "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
-            iface, eagain_count, empty_ok_count, data_read_count, parse_empty_count, total_packets
+            iface,
+            eagain_count,
+            empty_ok_count,
+            data_read_count,
+            parse_empty_count,
+            total_packets
         ),
     }
 }

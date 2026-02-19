@@ -765,10 +765,7 @@ fn cleanup_children(children: &mut [std::process::Child]) {
 /// If the child does not exit within `timeout`, it is killed and the function
 /// returns the output collected up to that point. This prevents test hangs
 /// when netoproc deadlocks or otherwise fails to exit.
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: Duration,
-) -> std::process::Output {
+fn wait_with_timeout(mut child: std::process::Child, timeout: Duration) -> std::process::Output {
     use std::io::Read;
 
     // Read stdout and stderr in background threads so the child doesn't
@@ -902,8 +899,8 @@ fn tc_12_2_process_attribution() {
             return false;
         }
         let is_known = cols[0] != "-" && cols[1] != "unknown";
-        let has_traffic = cols[2].parse::<u64>().unwrap_or(0) > 0
-            || cols[3].parse::<u64>().unwrap_or(0) > 0;
+        let has_traffic =
+            cols[2].parse::<u64>().unwrap_or(0) > 0 || cols[3].parse::<u64>().unwrap_or(0) > 0;
         is_known && has_traffic
     });
 
@@ -1069,9 +1066,7 @@ fn tc_12_6_json_process_objects() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
-        panic!(
-            "invalid JSON: {e}\nstdout:\n{stdout}\nstderr (diagnostics):\n{stderr}"
-        );
+        panic!("invalid JSON: {e}\nstdout:\n{stdout}\nstderr (diagnostics):\n{stderr}");
     });
 
     let arr = parsed.as_array().expect("expected JSON array");
