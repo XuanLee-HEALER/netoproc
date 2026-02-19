@@ -28,7 +28,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_dns: bool,
 
-    /// BPF kernel buffer size in bytes [default: 2097152]
+    /// BPF kernel buffer size in bytes
     #[arg(long, default_value_t = 2_097_152, value_parser = validate_bpf_buffer)]
     pub bpf_buffer: u32,
 
