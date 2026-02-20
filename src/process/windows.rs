@@ -16,14 +16,12 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
-    MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID,
-    MIB_UDP6TABLE_OWNER_PID, MIB_UDPROW_OWNER_PID, MIB_UDPTABLE_OWNER_PID,
-    TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID,
+    MIB_UDPROW_OWNER_PID, MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-    TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 
 use crate::model::traffic::{ProcessInfo, ProcessTable, SocketKey};
@@ -46,10 +44,7 @@ pub fn build_process_table() -> ProcessTable {
         let remote_port = u16::from_be(row.dwRemotePort as u16);
 
         let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
-        let name = pid_names
-            .get(&row.dwOwningPid)
-            .cloned()
-            .unwrap_or_default();
+        let name = pid_names.get(&row.dwOwningPid).cloned().unwrap_or_default();
         table.insert(
             key,
             ProcessInfo {
@@ -67,10 +62,7 @@ pub fn build_process_table() -> ProcessTable {
         let remote_port = u16::from_be(row.dwRemotePort as u16);
 
         let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
-        let name = pid_names
-            .get(&row.dwOwningPid)
-            .cloned()
-            .unwrap_or_default();
+        let name = pid_names.get(&row.dwOwningPid).cloned().unwrap_or_default();
         table.insert(
             key,
             ProcessInfo {
@@ -92,10 +84,7 @@ pub fn build_process_table() -> ProcessTable {
             0,
             17,
         );
-        let name = pid_names
-            .get(&row.dwOwningPid)
-            .cloned()
-            .unwrap_or_default();
+        let name = pid_names.get(&row.dwOwningPid).cloned().unwrap_or_default();
         table.insert(
             key,
             ProcessInfo {
@@ -117,10 +106,7 @@ pub fn build_process_table() -> ProcessTable {
             0,
             17,
         );
-        let name = pid_names
-            .get(&row.dwOwningPid)
-            .cloned()
-            .unwrap_or_default();
+        let name = pid_names.get(&row.dwOwningPid).cloned().unwrap_or_default();
         table.insert(
             key,
             ProcessInfo {

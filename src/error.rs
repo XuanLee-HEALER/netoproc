@@ -16,6 +16,8 @@ pub enum NetopError {
     Serialization(#[source] std::io::Error),
     #[error("capture device error: {0}")]
     CaptureDevice(String),
+    #[error("eBPF program error: {0}")]
+    EbpfProgram(String),
     #[error("TUI error: {0}")]
     Tui(#[source] std::io::Error),
     #[error("Windows API error: {0}")]

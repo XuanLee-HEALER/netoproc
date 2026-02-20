@@ -1,0 +1,24 @@
+[package]
+name = "netoproc-ebpf"
+version = "0.1.0"
+edition = "2021"
+description = "eBPF kernel programs for netoproc per-process network monitoring"
+publish = false
+
+[dependencies]
+aya-ebpf = "0.1"
+netoproc-ebpf-common = { path = "../netoproc-ebpf-common" }
+
+[[bin]]
+name = "netoproc-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2      # eBPF verifier needs optimized code
+panic = "abort"
+overflow-checks = false
+
+[profile.release]
+lto = true
+panic = "abort"
+overflow-checks = false

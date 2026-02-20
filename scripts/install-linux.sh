@@ -6,7 +6,9 @@
 # What it does:
 #   1. Creates a "netoproc" system group (if it doesn't exist)
 #   2. Adds the current user to the group
-#   3. Sets cap_net_raw,cap_net_admin,cap_sys_ptrace on the binary
+#   3. Detects kernel version and sets appropriate capabilities:
+#      - Kernel 5.8+: cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon (eBPF mode)
+#      - Older kernels: cap_net_raw,cap_net_admin,cap_sys_ptrace (AF_PACKET mode)
 #
 # After running this script, log out and back in (or run `newgrp netoproc`)
 # for group membership to take effect.
@@ -50,9 +52,28 @@ else
     echo "Added user $SUDO_USER to group $GROUP"
 fi
 
-# 3. Set capabilities
-setcap cap_net_raw,cap_net_admin,cap_sys_ptrace+eip "$BINARY"
-echo "Set capabilities on $BINARY"
+# 3. Detect kernel version and choose capabilities
+KERNEL_MAJOR=$(uname -r | cut -d. -f1)
+KERNEL_MINOR=$(uname -r | cut -d. -f2)
+
+if [ "$KERNEL_MAJOR" -gt 5 ] || { [ "$KERNEL_MAJOR" -eq 5 ] && [ "$KERNEL_MINOR" -ge 8 ]; }; then
+    # Kernel 5.8+: eBPF mode available
+    # cap_bpf        — load eBPF programs
+    # cap_perfmon    — attach kprobes for per-process traffic monitoring
+    # cap_net_raw    — AF_PACKET socket for DNS capture
+    # cap_net_admin  — promiscuous mode
+    # cap_sys_ptrace — read /proc/<pid>/fd/ for process attribution (AF_PACKET fallback)
+    CAPS="cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon,cap_sys_ptrace+eip"
+    echo "Kernel $(uname -r): eBPF mode supported"
+else
+    # Older kernel: AF_PACKET only
+    # cap_sys_ptrace — read /proc/<pid>/fd/ for process attribution
+    CAPS="cap_net_raw,cap_net_admin,cap_sys_ptrace+eip"
+    echo "Kernel $(uname -r): AF_PACKET mode (eBPF requires kernel 5.8+)"
+fi
+
+setcap "$CAPS" "$BINARY"
+echo "Set capabilities on $BINARY: $CAPS"
 
 # 4. Set group ownership so only group members can execute
 chgrp "$GROUP" "$BINARY"

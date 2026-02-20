@@ -776,8 +776,8 @@ mod windows_impl {
                 .push(RawSocket {
                     fd: -1,
                     family: AF_INET as i32,
-                    sock_type: 2,  // SOCK_DGRAM
-                    protocol: 17,  // UDP
+                    sock_type: 2, // SOCK_DGRAM
+                    protocol: 17, // UDP
                     local_addr: Some(local_addr),
                     local_port,
                     remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),

@@ -122,8 +122,10 @@ Priorities for future development:
 
 1. ~~**Cross-platform support** — Linux compatibility via `AF_PACKET`~~ (done in v0.4.0)
 2. ~~**Privilege model** — Reduce the need for full root access; capabilities on Linux, BPF device group permissions on macOS~~ (done — see [Running without sudo](#running-without-sudo))
-3. **Windows support** — via Npcap / WinAPI
-4. **UI improvements** — Richer TUI views, per-connection sparklines, configurable layouts, and theme support
+3. ~~**eBPF capture mode (Phase 1)** — Optional `--capture-mode=ebpf` infrastructure with kernel detection, stub backend, and auto-fallback~~ (done in v0.5.0)
+4. **eBPF capture mode (Phase 2)** — Full eBPF kprobe implementation for per-packet PID attribution
+5. **Windows support** — via Npcap / WinAPI
+6. **UI improvements** — Richer TUI views, per-connection sparklines, configurable layouts, and theme support
 
 ## Development
 

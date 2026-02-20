@@ -456,6 +456,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "netoproc-ebpf-common",
  "ratatui",
  "rustc-hash",
  "serde",
@@ -463,6 +464,10 @@ dependencies = [
  "thiserror",
  "windows-sys 0.59.0",
 ]
+
+[[package]]
+name = "netoproc-ebpf-common"
+version = "0.1.0"
 
 [[package]]
 name = "once_cell_polyfill"

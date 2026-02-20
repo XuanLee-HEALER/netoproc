@@ -31,3 +31,6 @@ pub use linux::*;
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::*;
+
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod ebpf;

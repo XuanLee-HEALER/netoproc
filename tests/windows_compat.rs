@@ -74,7 +74,9 @@ fn tc_w_1_7_port_1() {
 
 #[test]
 fn tc_w_1_8_port_roundtrip_all_common() {
-    for port in [22, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 6379, 8080, 8443, 27017] {
+    for port in [
+        22, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 6379, 8080, 8443, 27017,
+    ] {
         let dw = port_to_win_dword(port);
         assert_eq!(
             win_port_from_dword(dw),
@@ -745,7 +747,10 @@ fn tc_w_8_1_bounds_check_rejects_overflow() {
 
     // This is the check from our Windows code
     let fits = header_size + num_entries * row_size <= buffer.len();
-    assert!(!fits, "should reject: claimed 1000 entries in 16-byte buffer");
+    assert!(
+        !fits,
+        "should reject: claimed 1000 entries in 16-byte buffer"
+    );
 }
 
 #[test]

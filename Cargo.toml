@@ -36,3 +36,18 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_IO",
 ] }
+
+[dev-dependencies]
+netoproc-ebpf-common = { path = "netoproc-ebpf-common" }
+
+[workspace]
+members = [".", "netoproc-ebpf-common"]
+
+[features]
+default = []
+# Phase 1: ebpf feature enables detection code and stub backend.
+# Phase 2: will add aya dependency here once eBPF framework is finalized.
+# Note: aya v0.13 transitively pulls in tokio, which conflicts with the
+# project's no-tokio policy. Phase 2 must either use aya without tokio,
+# choose an alternative (libbpf-rs), or formally amend the policy.
+ebpf = []

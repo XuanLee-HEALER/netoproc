@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use windows_sys::Win32::Networking::WinSock::{
-    self as ws, AF_INET, FIONBIO, INVALID_SOCKET, IPPROTO_IP, RCVALL_ON, SIO_RCVALL, SOCK_RAW,
-    SOCKET, SOCKET_ERROR, SOL_SOCKET, SO_RCVTIMEO, WSADATA, WSA_FLAG_OVERLAPPED,
+    self as ws, AF_INET, FIONBIO, INVALID_SOCKET, IPPROTO_IP, RCVALL_ON, SIO_RCVALL, SO_RCVTIMEO,
+    SOCK_RAW, SOCKET, SOCKET_ERROR, SOL_SOCKET, WSA_FLAG_OVERLAPPED, WSADATA,
 };
 
 use crate::dns::DnsMessage;
@@ -97,7 +97,16 @@ impl RawSocketCapture {
         ensure_wsa_init()?;
 
         // 1. Create raw socket
-        let socket = unsafe { ws::WSASocketW(AF_INET as i32, SOCK_RAW, IPPROTO_IP, std::ptr::null(), 0, WSA_FLAG_OVERLAPPED) };
+        let socket = unsafe {
+            ws::WSASocketW(
+                AF_INET as i32,
+                SOCK_RAW,
+                IPPROTO_IP,
+                std::ptr::null(),
+                0,
+                WSA_FLAG_OVERLAPPED,
+            )
+        };
         if socket == INVALID_SOCKET {
             let err = unsafe { ws::WSAGetLastError() };
             return Err(NetopError::CaptureDevice(format!(
@@ -363,8 +372,7 @@ impl RawSocketCapture {
                 }
                 let next_hdr = data[6];
                 // Skip extension headers to find the actual transport protocol
-                let (final_proto, _) =
-                    packet::skip_ipv6_extension_headers(next_hdr, &data[40..]);
+                let (final_proto, _) = packet::skip_ipv6_extension_headers(next_hdr, &data[40..]);
                 matches!(final_proto, 6 | 17 | 58) // TCP, UDP, ICMPv6
             }
             _ => false,
@@ -456,7 +464,16 @@ pub fn check_capture_access() -> Result<(), NetopError> {
     ensure_wsa_init()?;
 
     // Try to create a raw socket to test privileges
-    let socket = unsafe { ws::WSASocketW(AF_INET as i32, SOCK_RAW, IPPROTO_IP, std::ptr::null(), 0, WSA_FLAG_OVERLAPPED) };
+    let socket = unsafe {
+        ws::WSASocketW(
+            AF_INET as i32,
+            SOCK_RAW,
+            IPPROTO_IP,
+            std::ptr::null(),
+            0,
+            WSA_FLAG_OVERLAPPED,
+        )
+    };
     if socket == INVALID_SOCKET {
         let err = unsafe { ws::WSAGetLastError() };
         // WSAEACCES (10013) = permission denied
@@ -490,7 +507,13 @@ pub fn open_capture_devices(
     let mut captures = Vec::new();
     for iface in interfaces {
         if let Some(&ip) = iface_ips.get(iface.as_str()) {
-            match RawSocketCapture::new(iface, ip, buffer_size, FilterKind::Traffic, local_ips.clone()) {
+            match RawSocketCapture::new(
+                iface,
+                ip,
+                buffer_size,
+                FilterKind::Traffic,
+                local_ips.clone(),
+            ) {
                 Ok(cap) => captures.push(cap),
                 Err(e) => {
                     log::warn!("Skipping interface {}: {}", iface, e);
