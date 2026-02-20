@@ -42,10 +42,10 @@ fn ensure_wsa_init() -> Result<(), NetopError> {
     result.clone().map_err(NetopError::WinApi)
 }
 
-/// Clean up Winsock resources. Call once during process shutdown.
+/// Clean up Winsock resources. Must be called exactly once during shutdown.
 ///
-/// Only has effect if `ensure_wsa_init()` succeeded. Safe to call
-/// multiple times (only the first call after init has effect).
+/// Only has effect if `ensure_wsa_init()` succeeded. Per MSDN, each
+/// successful `WSAStartup` must be matched by exactly one `WSACleanup`.
 pub fn wsa_cleanup() {
     if let Some(Ok(())) = WSA_INIT.get() {
         unsafe { ws::WSACleanup() };
@@ -86,7 +86,10 @@ impl RawSocketCapture {
     /// Create a new raw socket capture device bound to `interface_ip`.
     ///
     /// On Windows, capture devices are bound to an interface IP address
-    /// rather than an interface name.
+    /// rather than an interface name. The `_filter_kind` parameter is
+    /// accepted for API compatibility but ignored — Windows raw sockets
+    /// have no kernel-level BPF. Traffic vs DNS filtering is done in
+    /// software by `matches_traffic_filter()` and `extract_dns_payload()`.
     pub fn new(
         interface_name: &str,
         interface_ip: Ipv4Addr,
@@ -205,8 +208,8 @@ impl RawSocketCapture {
     /// Blocking read of packets, returning raw byte count.
     ///
     /// Receives IP packets (no Ethernet header) and parses them using
-    /// `parse_raw_frame`. Software-level filtering is applied based on
-    /// the configured `FilterKind`.
+    /// `parse_raw_frame`. A software-level traffic filter accepts only
+    /// TCP, UDP, and ICMP packets (Windows raw sockets have no kernel BPF).
     pub fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError> {
         out.clear();
         let mut total_bytes = 0usize;
@@ -500,6 +503,7 @@ pub fn open_capture_devices(
     interfaces: &[String],
     buffer_size: u32,
     dns_enabled: bool,
+    _capture_mode: crate::cli::CaptureMode,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
     let local_ips = collect_local_ips()?;
     let iface_ips = get_interface_ips()?;
