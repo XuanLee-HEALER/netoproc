@@ -15,3 +15,8 @@ pub use macos::*;
 pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::build_process_table;
+
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::build_process_table;

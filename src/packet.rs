@@ -145,6 +145,9 @@ pub fn parse_raw_frame(data: &[u8]) -> Option<PacketSummary> {
 }
 
 /// Parse a DLT_NULL framed packet — 4-byte AF header in host byte order.
+///
+/// Only used on macOS (lo0 loopback). On Windows there is no DLT_NULL.
+#[cfg(not(target_os = "windows"))]
 pub fn parse_null_frame(data: &[u8]) -> Option<PacketSummary> {
     if data.len() < 4 {
         return None;
@@ -156,6 +159,12 @@ pub fn parse_null_frame(data: &[u8]) -> Option<PacketSummary> {
         af if af == libc::AF_INET6 as u32 => parse_ipv6(l3_data),
         _ => None,
     }
+}
+
+/// Stub for Windows (DLT_NULL is not used).
+#[cfg(target_os = "windows")]
+pub fn parse_null_frame(_data: &[u8]) -> Option<PacketSummary> {
+    None
 }
 
 /// Parse an IPv4 packet from the start of the IP header.

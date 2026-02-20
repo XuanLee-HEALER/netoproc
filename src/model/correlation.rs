@@ -344,13 +344,21 @@ fn format_addr_port(addr: Option<IpAddr>, port: u16) -> String {
 }
 
 fn uid_to_username(uid: u32) -> String {
-    // Use getpwuid to resolve username
-    let pw = unsafe { libc::getpwuid(uid) };
-    if pw.is_null() {
-        return uid.to_string();
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Use getpwuid to resolve username on Unix
+        let pw = unsafe { libc::getpwuid(uid) };
+        if pw.is_null() {
+            return uid.to_string();
+        }
+        let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
+        name.to_string_lossy().into_owned()
     }
-    let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
-    name.to_string_lossy().into_owned()
+    #[cfg(target_os = "windows")]
+    {
+        // Windows does not have Unix UIDs; return as-is
+        uid.to_string()
+    }
 }
 
 fn find_prev_connection(
@@ -406,7 +414,7 @@ fn build_interfaces(
             }
         }
 
-        let status = if raw.flags & libc::IFF_UP as u32 != 0 {
+        let status = if raw.is_up() {
             InterfaceStatus::Up
         } else {
             InterfaceStatus::Down

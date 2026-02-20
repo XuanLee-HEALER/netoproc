@@ -701,3 +701,195 @@ mod linux_impl {
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::{build_process_table, list_processes, tcp_state_to_socket_state};
+
+// ---------------------------------------------------------------------------
+// Windows: IP Helper + Toolhelp32 process enumeration
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use super::*;
+    use std::collections::HashMap;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use crate::process::windows as win_helpers;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    pub fn list_processes() -> Result<Vec<RawProcess>, NetopError> {
+        let pid_names = win_helpers::build_pid_name_map();
+        let mut pid_sockets: HashMap<u32, Vec<RawSocket>> = HashMap::new();
+
+        // TCP IPv4
+        for row in win_helpers::get_tcp4_rows() {
+            let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+            let remote_addr = IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+            let remote_port = u16::from_be(row.dwRemotePort as u16);
+
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET as i32,
+                    sock_type: 1, // SOCK_STREAM
+                    protocol: 6,  // TCP
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(remote_addr),
+                    remote_port,
+                    tcp_state: Some(row.dwState as i32),
+                });
+        }
+
+        // TCP IPv6
+        for row in win_helpers::get_tcp6_rows() {
+            let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+            let remote_addr = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+            let remote_port = u16::from_be(row.dwRemotePort as u16);
+
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET6 as i32,
+                    sock_type: 1,
+                    protocol: 6,
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(remote_addr),
+                    remote_port,
+                    tcp_state: Some(row.dwState as i32),
+                });
+        }
+
+        // UDP IPv4
+        for row in win_helpers::get_udp4_rows() {
+            let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET as i32,
+                    sock_type: 2, // SOCK_DGRAM
+                    protocol: 17, // UDP
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                    remote_port: 0,
+                    tcp_state: None,
+                });
+        }
+
+        // UDP IPv6
+        for row in win_helpers::get_udp6_rows() {
+            let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET6 as i32,
+                    sock_type: 2,
+                    protocol: 17,
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+                    remote_port: 0,
+                    tcp_state: None,
+                });
+        }
+
+        let mut processes = Vec::new();
+        for (pid, sockets) in pid_sockets {
+            if sockets.is_empty() {
+                continue;
+            }
+            let name = pid_names.get(&pid).cloned().unwrap_or_default();
+            processes.push(RawProcess {
+                pid,
+                name,
+                uid: 0, // Windows doesn't have Unix UIDs
+                sockets,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    pub fn build_process_table() -> crate::model::traffic::ProcessTable {
+        crate::process::build_process_table()
+    }
+
+    /// Map Windows MIB_TCP_STATE values to our SocketState enum.
+    ///
+    /// Windows values: 1=CLOSED, 2=LISTEN, 3=SYN_SENT, 4=SYN_RCVD,
+    /// 5=ESTAB, 6=FIN_WAIT1, 7=FIN_WAIT2, 8=CLOSE_WAIT,
+    /// 9=CLOSING, 10=LAST_ACK, 11=TIME_WAIT, 12=DELETE_TCB
+    pub fn tcp_state_to_socket_state(state: i32) -> crate::model::SocketState {
+        use crate::model::SocketState;
+        match state {
+            1 => SocketState::Closed,
+            2 => SocketState::Listen,
+            3 => SocketState::SynSent,
+            4 => SocketState::SynReceived,
+            5 => SocketState::Established,
+            6 => SocketState::FinWait1,
+            7 => SocketState::FinWait2,
+            8 => SocketState::CloseWait,
+            9 => SocketState::Closing,
+            10 => SocketState::LastAck,
+            11 => SocketState::TimeWait,
+            _ => SocketState::Closed,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::model::SocketState;
+
+        #[test]
+        fn tcp_state_mapping_all_valid() {
+            assert_eq!(tcp_state_to_socket_state(1), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(2), SocketState::Listen);
+            assert_eq!(tcp_state_to_socket_state(3), SocketState::SynSent);
+            assert_eq!(tcp_state_to_socket_state(4), SocketState::SynReceived);
+            assert_eq!(tcp_state_to_socket_state(5), SocketState::Established);
+            assert_eq!(tcp_state_to_socket_state(6), SocketState::FinWait1);
+            assert_eq!(tcp_state_to_socket_state(7), SocketState::FinWait2);
+            assert_eq!(tcp_state_to_socket_state(8), SocketState::CloseWait);
+            assert_eq!(tcp_state_to_socket_state(9), SocketState::Closing);
+            assert_eq!(tcp_state_to_socket_state(10), SocketState::LastAck);
+            assert_eq!(tcp_state_to_socket_state(11), SocketState::TimeWait);
+        }
+
+        #[test]
+        fn tcp_state_delete_tcb() {
+            assert_eq!(tcp_state_to_socket_state(12), SocketState::Closed);
+        }
+
+        #[test]
+        fn tcp_state_unknown() {
+            assert_eq!(tcp_state_to_socket_state(0), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(13), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(-1), SocketState::Closed);
+        }
+
+        #[test]
+        fn list_processes_does_not_panic() {
+            let result = list_processes();
+            assert!(result.is_ok());
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::{build_process_table, list_processes, tcp_state_to_socket_state};

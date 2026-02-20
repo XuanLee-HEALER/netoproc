@@ -30,10 +30,16 @@ use netoproc::system;
 /// Global shutdown flag, set by signal handlers.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+// ---------------------------------------------------------------------------
+// Signal handling — platform-specific
+// ---------------------------------------------------------------------------
+
+#[cfg(not(target_os = "windows"))]
 extern "C" fn signal_handler(_sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
 }
 
+#[cfg(not(target_os = "windows"))]
 fn install_signal_handlers() {
     unsafe {
         libc::signal(
@@ -47,11 +53,34 @@ fn install_signal_handlers() {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn install_signal_handlers() {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, SetConsoleCtrlHandler,
+    };
+
+    unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> i32 {
+        match ctrl_type {
+            CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT => {
+                SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
+                1 // handled
+            }
+            _ => 0,
+        }
+    }
+
+    let ret = unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
+    if ret == 0 {
+        log::warn!("SetConsoleCtrlHandler failed");
+    }
+}
+
 /// Exit codes per netoproc-requirements.md §9
 fn exit_code(err: &NetopError) -> i32 {
     match err {
         NetopError::InsufficientPermission(_) => 1,
         NetopError::BpfDevice(_) | NetopError::CaptureDevice(_) | NetopError::EbpfProgram(_) => 2,
+        NetopError::WinApi(_) => 4,
         NetopError::Tui(_) => 4,
         NetopError::Fatal(_) => 4,
         _ => 4,
@@ -206,6 +235,10 @@ fn run(cli: Cli) -> Result<(), NetopError> {
         let _ = h.join();
     }
 
+    // 11. Platform cleanup.
+    #[cfg(target_os = "windows")]
+    capture::wsa_cleanup();
+
     result
 }
 
@@ -225,9 +258,7 @@ fn discover_interfaces(cli: &Cli) -> Result<Vec<String>, NetopError> {
         .into_iter()
         .filter(|i| {
             // Filter out loopback and down interfaces.
-            let is_up = (i.flags & libc::IFF_UP as u32) != 0;
-            let is_loopback = (i.flags & libc::IFF_LOOPBACK as u32) != 0;
-            is_up && !is_loopback
+            i.is_up() && !i.is_loopback()
         })
         .map(|i| i.name)
         .collect();

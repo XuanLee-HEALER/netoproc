@@ -374,3 +374,75 @@ fn parse_proc_net_udp(content: &str, is_v6: bool, out: &mut Vec<RawUdpConnection
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Windows: GetExtendedTcpTable / GetExtendedUdpTable
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+pub fn list_tcp_connections() -> Result<Vec<RawTcpConnection>, NetopError> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use crate::process::windows as win_helpers;
+
+    let mut conns = Vec::new();
+
+    // IPv4 TCP
+    for row in win_helpers::get_tcp4_rows() {
+        conns.push(RawTcpConnection {
+            local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes())),
+            remote_port: u16::from_be(row.dwRemotePort as u16),
+            tcp_state: row.dwState as i32,
+            if_index: 0,
+        });
+    }
+
+    // IPv6 TCP
+    for row in win_helpers::get_tcp6_rows() {
+        conns.push(RawTcpConnection {
+            local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr)),
+            remote_port: u16::from_be(row.dwRemotePort as u16),
+            tcp_state: row.dwState as i32,
+            if_index: 0,
+        });
+    }
+
+    Ok(conns)
+}
+
+#[cfg(target_os = "windows")]
+pub fn list_udp_connections() -> Result<Vec<RawUdpConnection>, NetopError> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use crate::process::windows as win_helpers;
+
+    let mut conns = Vec::new();
+
+    // IPv4 UDP
+    for row in win_helpers::get_udp4_rows() {
+        conns.push(RawUdpConnection {
+            local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            remote_port: 0,
+            if_index: 0,
+        });
+    }
+
+    // IPv6 UDP
+    for row in win_helpers::get_udp6_rows() {
+        conns.push(RawUdpConnection {
+            local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            remote_port: 0,
+            if_index: 0,
+        });
+    }
+
+    Ok(conns)
+}

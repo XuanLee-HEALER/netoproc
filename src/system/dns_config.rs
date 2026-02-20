@@ -280,6 +280,104 @@ pub(crate) fn parse_resolv_conf(path: &str) -> Result<Vec<RawDnsResolver>, Netop
     }])
 }
 
+// ---------------------------------------------------------------------------
+// Windows: GetAdaptersAddresses DNS fields
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+pub fn list_dns_resolvers() -> Result<Vec<RawDnsResolver>, NetopError> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::{
+        AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+    };
+
+    let mut size: u32 = 0;
+    let flags = GAA_FLAG_INCLUDE_PREFIX;
+    unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        );
+    }
+
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut buffer = vec![0u8; size as usize];
+    let ret = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+            &mut size,
+        )
+    };
+
+    if ret != 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut all_servers = Vec::new();
+    let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+    while !adapter.is_null() {
+        let a = unsafe { &*adapter };
+
+        // Walk DNS server address linked list
+        let mut dns_server = a.FirstDnsServerAddress;
+        while !dns_server.is_null() {
+            let ds = unsafe { &*dns_server };
+            let sa = unsafe { &*ds.Address.lpSockaddr };
+
+            let addr_str = match sa.sa_family {
+                AF_INET => {
+                    let sa_in = unsafe { &*(ds.Address.lpSockaddr as *const SOCKADDR_IN) };
+                    let bytes = unsafe { sa_in.sin_addr.S_un.S_addr }.to_ne_bytes();
+                    Some(format!(
+                        "{}",
+                        Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])
+                    ))
+                }
+                AF_INET6 => {
+                    let sa_in6 = unsafe { &*(ds.Address.lpSockaddr as *const SOCKADDR_IN6) };
+                    let addr_bytes = unsafe { sa_in6.sin6_addr.u.Byte };
+                    let addr = Ipv6Addr::from(addr_bytes);
+                    Some(format!("{addr}"))
+                }
+                _ => None,
+            };
+
+            if let Some(s) = addr_str
+                && !all_servers.contains(&s)
+            {
+                all_servers.push(s);
+            }
+
+            dns_server = ds.Next;
+        }
+
+        adapter = a.Next;
+    }
+
+    if all_servers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(vec![RawDnsResolver {
+        interface: "global".to_string(),
+        server_addresses: all_servers,
+        search_domains: Vec::new(), // Windows DNS search domains are complex; skip for now
+    }])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
