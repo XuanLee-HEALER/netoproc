@@ -18,6 +18,8 @@ pub enum NetopError {
     CaptureDevice(String),
     #[error("TUI error: {0}")]
     Tui(#[source] std::io::Error),
+    #[error("Windows API error: {0}")]
+    WinApi(String),
     #[error("fatal: {0}")]
     Fatal(String),
 }

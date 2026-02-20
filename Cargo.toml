@@ -1,12 +1,12 @@
 [package]
 name = "netoproc"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
-description = "Per-process network traffic monitor for macOS and Linux"
+description = "Per-process network traffic monitor for macOS, Linux, and Windows"
 license = "MIT"
 repository = "https://github.com/XuanLee-HEALER/netoproc"
 readme = "README.md"
-keywords = ["network", "monitor", "tui", "macos", "linux"]
+keywords = ["network", "monitor", "tui", "macos", "linux", "windows"]
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
@@ -17,9 +17,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arc-swap = "1"
 crossbeam-channel = "0.5"
-libc = "0.2"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 rustc-hash = "2"
 dns-lookup = "2"
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_IO",
+] }

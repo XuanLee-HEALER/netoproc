@@ -563,10 +563,10 @@ mod linux_impl {
                 };
 
                 let link_str = link.to_string_lossy();
-                if let Some(inode) = crate::process::linux::parse_socket_inode(&link_str) {
-                    if inode_to_socket.contains_key(&inode) {
-                        pid_sockets.entry(pid).or_default().push(inode);
-                    }
+                if let Some(inode) = crate::process::linux::parse_socket_inode(&link_str)
+                    && inode_to_socket.contains_key(&inode)
+                {
+                    pid_sockets.entry(pid).or_default().push(inode);
                 }
             }
         }
@@ -679,10 +679,10 @@ mod linux_impl {
         let path = format!("/proc/{pid}/status");
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("Uid:") {
-                    if let Some(uid_str) = rest.split_whitespace().next() {
-                        return uid_str.parse().unwrap_or(0);
-                    }
+                if let Some(rest) = line.strip_prefix("Uid:")
+                    && let Some(uid_str) = rest.split_whitespace().next()
+                {
+                    return uid_str.parse().unwrap_or(0);
                 }
             }
         }
@@ -701,3 +701,377 @@ mod linux_impl {
 
 #[cfg(target_os = "linux")]
 pub use linux_impl::{build_process_table, list_processes, tcp_state_to_socket_state};
+
+// ---------------------------------------------------------------------------
+// Windows: IP Helper + Toolhelp32 process enumeration
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use super::*;
+    use std::collections::HashMap;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID,
+        MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
+        MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID, MIB_UDPROW_OWNER_PID,
+        MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
+    };
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+
+    pub fn list_processes() -> Result<Vec<RawProcess>, NetopError> {
+        let pid_names = build_pid_name_map();
+        let mut pid_sockets: HashMap<u32, Vec<RawSocket>> = HashMap::new();
+
+        // TCP IPv4
+        if let Some(rows) = get_tcp4_rows() {
+            for row in rows {
+                let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+                let remote_addr = IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()));
+                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+                let remote_port = u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes());
+
+                pid_sockets
+                    .entry(row.dwOwningPid)
+                    .or_default()
+                    .push(RawSocket {
+                        fd: -1,
+                        family: 2, // AF_INET
+                        sock_type: 1, // SOCK_STREAM
+                        protocol: 6, // TCP
+                        local_addr: Some(local_addr),
+                        local_port,
+                        remote_addr: Some(remote_addr),
+                        remote_port,
+                        tcp_state: Some(row.dwState as i32),
+                    });
+            }
+        }
+
+        // TCP IPv6
+        if let Some(rows) = get_tcp6_rows() {
+            for row in rows {
+                let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+                let remote_addr = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
+                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+                let remote_port = u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes());
+
+                pid_sockets
+                    .entry(row.dwOwningPid)
+                    .or_default()
+                    .push(RawSocket {
+                        fd: -1,
+                        family: 23, // AF_INET6 on Windows
+                        sock_type: 1,
+                        protocol: 6,
+                        local_addr: Some(local_addr),
+                        local_port,
+                        remote_addr: Some(remote_addr),
+                        remote_port,
+                        tcp_state: Some(row.dwState as i32),
+                    });
+            }
+        }
+
+        // UDP IPv4
+        if let Some(rows) = get_udp4_rows() {
+            for row in rows {
+                let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+
+                pid_sockets
+                    .entry(row.dwOwningPid)
+                    .or_default()
+                    .push(RawSocket {
+                        fd: -1,
+                        family: 2,
+                        sock_type: 2, // SOCK_DGRAM
+                        protocol: 17, // UDP
+                        local_addr: Some(local_addr),
+                        local_port,
+                        remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                        remote_port: 0,
+                        tcp_state: None,
+                    });
+            }
+        }
+
+        // UDP IPv6
+        if let Some(rows) = get_udp6_rows() {
+            for row in rows {
+                let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+
+                pid_sockets
+                    .entry(row.dwOwningPid)
+                    .or_default()
+                    .push(RawSocket {
+                        fd: -1,
+                        family: 23,
+                        sock_type: 2,
+                        protocol: 17,
+                        local_addr: Some(local_addr),
+                        local_port,
+                        remote_addr: Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+                        remote_port: 0,
+                        tcp_state: None,
+                    });
+            }
+        }
+
+        let mut processes = Vec::new();
+        for (pid, sockets) in pid_sockets {
+            if sockets.is_empty() {
+                continue;
+            }
+            let name = pid_names.get(&pid).cloned().unwrap_or_default();
+            processes.push(RawProcess {
+                pid,
+                name,
+                uid: 0, // Windows doesn't have Unix UIDs
+                sockets,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    fn get_tcp4_rows() -> Option<Vec<MIB_TCPROW_OWNER_PID>> {
+        let mut size: u32 = 0;
+        unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+        }
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let ret = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr() as *mut _,
+                &mut size,
+                0,
+                AF_INET as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+
+        let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
+            as *const MIB_TCPROW_OWNER_PID;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            result.push(unsafe { *rows_ptr.add(i) });
+        }
+        Some(result)
+    }
+
+    fn get_tcp6_rows() -> Option<Vec<MIB_TCP6ROW_OWNER_PID>> {
+        let mut size: u32 = 0;
+        unsafe {
+            GetExtendedTcpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET6 as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            );
+        }
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let ret = unsafe {
+            GetExtendedTcpTable(
+                buffer.as_mut_ptr() as *mut _,
+                &mut size,
+                0,
+                AF_INET6 as u32,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+
+        let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
+            as *const MIB_TCP6ROW_OWNER_PID;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            result.push(unsafe { *rows_ptr.add(i) });
+        }
+        Some(result)
+    }
+
+    fn get_udp4_rows() -> Option<Vec<MIB_UDPROW_OWNER_PID>> {
+        let mut size: u32 = 0;
+        unsafe {
+            GetExtendedUdpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET as u32,
+                UDP_TABLE_OWNER_PID,
+                0,
+            );
+        }
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let ret = unsafe {
+            GetExtendedUdpTable(
+                buffer.as_mut_ptr() as *mut _,
+                &mut size,
+                0,
+                AF_INET as u32,
+                UDP_TABLE_OWNER_PID,
+                0,
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+
+        let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
+            as *const MIB_UDPROW_OWNER_PID;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            result.push(unsafe { *rows_ptr.add(i) });
+        }
+        Some(result)
+    }
+
+    fn get_udp6_rows() -> Option<Vec<MIB_UDP6ROW_OWNER_PID>> {
+        let mut size: u32 = 0;
+        unsafe {
+            GetExtendedUdpTable(
+                std::ptr::null_mut(),
+                &mut size,
+                0,
+                AF_INET6 as u32,
+                UDP_TABLE_OWNER_PID,
+                0,
+            );
+        }
+        if size == 0 {
+            return None;
+        }
+
+        let mut buffer = vec![0u8; size as usize];
+        let ret = unsafe {
+            GetExtendedUdpTable(
+                buffer.as_mut_ptr() as *mut _,
+                &mut size,
+                0,
+                AF_INET6 as u32,
+                UDP_TABLE_OWNER_PID,
+                0,
+            )
+        };
+        if ret != 0 {
+            return None;
+        }
+
+        let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
+        let count = table.dwNumEntries as usize;
+        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
+            as *const MIB_UDP6ROW_OWNER_PID;
+
+        let mut result = Vec::with_capacity(count);
+        for i in 0..count {
+            result.push(unsafe { *rows_ptr.add(i) });
+        }
+        Some(result)
+    }
+
+    fn build_pid_name_map() -> HashMap<u32, String> {
+        let mut map = HashMap::new();
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return map;
+        }
+
+        let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+        if unsafe { Process32First(snapshot, &mut entry) } != 0 {
+            loop {
+                let name = exe_file_to_string(&entry.szExeFile);
+                map.insert(entry.th32ProcessID, name);
+                if unsafe { Process32Next(snapshot, &mut entry) } == 0 {
+                    break;
+                }
+            }
+        }
+
+        unsafe { CloseHandle(snapshot) };
+        map
+    }
+
+    fn exe_file_to_string(bytes: &[i8]) -> String {
+        let as_u8: &[u8] =
+            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
+        let len = as_u8.iter().position(|&b| b == 0).unwrap_or(as_u8.len());
+        String::from_utf8_lossy(&as_u8[..len]).into_owned()
+    }
+
+    pub fn build_process_table() -> crate::model::traffic::ProcessTable {
+        crate::process::build_process_table()
+    }
+
+    /// Map Windows MIB_TCP_STATE values to our SocketState enum.
+    ///
+    /// Windows values: 1=CLOSED, 2=LISTEN, 3=SYN_SENT, 4=SYN_RCVD,
+    /// 5=ESTAB, 6=FIN_WAIT1, 7=FIN_WAIT2, 8=CLOSE_WAIT,
+    /// 9=CLOSING, 10=LAST_ACK, 11=TIME_WAIT, 12=DELETE_TCB
+    pub fn tcp_state_to_socket_state(state: i32) -> crate::model::SocketState {
+        use crate::model::SocketState;
+        match state {
+            1 => SocketState::Closed,
+            2 => SocketState::Listen,
+            3 => SocketState::SynSent,
+            4 => SocketState::SynReceived,
+            5 => SocketState::Established,
+            6 => SocketState::FinWait1,
+            7 => SocketState::FinWait2,
+            8 => SocketState::CloseWait,
+            9 => SocketState::Closing,
+            10 => SocketState::LastAck,
+            11 => SocketState::TimeWait,
+            _ => SocketState::Closed,
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::{build_process_table, list_processes, tcp_state_to_socket_state};

@@ -103,7 +103,7 @@ impl AfPacketCapture {
         // 3. Bind to interface
         let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
-        sll.sll_protocol = (ETH_P_ALL as u16).to_be();
+        sll.sll_protocol = ETH_P_ALL.to_be();
         sll.sll_ifindex = if_index as i32;
 
         let ret = unsafe {
