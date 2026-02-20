@@ -9,6 +9,7 @@ pub struct SystemNetworkState {
     pub interfaces: Vec<Interface>,
     pub processes: Vec<Process>,
     pub dns: DnsObservatory,
+    pub unknown_details: Vec<UnknownRemoteEntry>,
 }
 
 impl SystemNetworkState {
@@ -18,6 +19,7 @@ impl SystemNetworkState {
             interfaces: Vec::new(),
             processes: Vec::new(),
             dns: DnsObservatory::default(),
+            unknown_details: Vec::new(),
         }
     }
 }
@@ -28,9 +30,21 @@ impl Default for SystemNetworkState {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Debug, PartialEq, Eq, Hash)]
+/// Per-remote-address entry for Unknown traffic detail in the TUI.
+#[derive(Clone, Serialize, Default)]
+pub struct UnknownRemoteEntry {
+    pub remote_addr: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rdns: Option<String>,
+    pub annotation: Option<String>,
+    pub protocol: Protocol,
+}
+
+#[derive(Clone, Copy, Serialize, Debug, Default, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
+    #[default]
     Tcp,
     Udp,
     Icmp,

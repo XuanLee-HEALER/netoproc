@@ -1,6 +1,6 @@
 [package]
 name = "netoproc"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Per-process network traffic monitor for macOS"
 license = "MIT"
@@ -22,3 +22,4 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 rustc-hash = "2"
+dns-lookup = "2"

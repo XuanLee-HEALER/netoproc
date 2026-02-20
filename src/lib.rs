@@ -1,5 +1,6 @@
 pub mod bpf;
 pub mod cli;
+pub mod enrichment;
 pub mod error;
 pub mod model;
 pub mod output;

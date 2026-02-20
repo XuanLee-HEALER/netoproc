@@ -351,3 +351,53 @@ launchd plist 设置了 `RunAtLoad`，系统每次重启时会重新执行权限
 ### 6.4 macOS 版本兼容性
 
 `dseditgroup` 和 launchd 在 macOS 10.15（Catalina）及以上版本行为一致。不需要针对不同版本做兼容处理。
+
+---
+
+## 7. 进程归因的系统级限制
+
+### 7.1 问题描述
+
+`access_bpf` 组解决了 BPF 抓包的权限问题，但进程归因存在一个独立的、无法通过用户组绕过的系统级限制。
+
+macOS 上进程信息通过 `libproc` 的两个调用获取：
+
+```
+proc_listpids(PROC_ALL_PIDS)     → 列出所有 PID（普通用户可以调用）
+proc_pidinfo(PROC_PIDLISTFDS)    → 获取指定进程的 fd 列表
+```
+
+`proc_pidinfo` 对**其他用户的进程**返回 `EPERM`，这是 macOS 内核的安全策略，不受文件系统权限或用户组控制。能绕过它的只有两种途径：以 root 身份运行，或拥有 Apple 签名的 `task_for_pid` entitlement（开源工具无法获得）。
+
+### 7.2 实际影响
+
+非 root 运行时的进程归因能力：
+
+| 进程类型 | 示例 | 能否归因 |
+|----------|------|----------|
+| 当前用户的进程 | Chrome、curl、ssh | ✓ 正常归因 |
+| 其他普通用户的进程 | 多用户场景 | ✗ 归入 Unknown |
+| 系统守护进程（root） | mDNSResponder、nsurlsessiond、trustd | ✗ 归入 Unknown |
+
+对于单用户桌面场景，用户自己启动的所有应用（浏览器、开发工具、下载器等）均能正常归因。归入 Unknown 的主要是系统守护进程，这些进程的流量通常是可预期的背景噪声。
+
+### 7.3 设计决策
+
+有几种方案可以绕过这个限制，但均被有意排除：
+
+**长驻 root daemon**：以 root 身份运行一个常驻进程专门负责收集进程表，主进程通过 IPC 查询。被排除的原因是：用户对长期以 root 权限运行的后台进程有合理的安全顾虑，这与 netoproc 最小权限原则不符。
+
+**setuid helper（每次刷新 fork）**：每 500ms fork 一个 setuid root 的子进程收集进程表。被排除的原因是：fork+exec 开销在 monitor 模式下累积，延迟不可接受。
+
+**有意接受这个限制**，通过 Unknown 流量信息增强（反向 DNS + 端口标注）让用户仍能推断出大部分系统流量的来源。详见《反向 DNS 与端口标注设计文档》。
+
+### 7.4 与 Linux 的对比
+
+Linux 上不存在这个限制。`cap_sys_ptrace` capability 允许读取任意进程的 `/proc/<pid>/fd/`，包括 root 进程和其他用户的进程。授予该 capability 后，Linux 版本的进程归因能力与 `sudo` 运行完全一致。
+
+```
+macOS（普通用户）→ 只能归因当前用户的进程
+Linux（cap_sys_ptrace）→ 能归因系统所有进程
+```
+
+这是两个平台在进程归因能力上的根本差异，由操作系统安全模型决定，非实现缺陷。

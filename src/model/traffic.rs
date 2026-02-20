@@ -1,4 +1,5 @@
-use std::net::IpAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 
 use rustc_hash::FxHashMap;
 
@@ -88,6 +89,24 @@ impl TrafficStats {
             }
         }
     }
+}
+
+/// Per-remote-address stats for Unknown traffic.
+#[derive(Default, Debug, Clone)]
+pub struct ConnectionStats {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    /// Reverse DNS state: None = not queried, Some(None) = failed, Some(Some(name)) = resolved.
+    pub rdns: Option<Option<String>>,
+    pub annotation: Option<String>,
+    pub protocol: Protocol,
+}
+
+/// Composite stats state: per-process traffic plus Unknown per-remote breakdown.
+#[derive(Default)]
+pub struct StatsState {
+    pub by_process: HashMap<ProcessKey, TrafficStats>,
+    pub unknown_by_remote: HashMap<SocketAddr, ConnectionStats>,
 }
 
 /// Process table: normalized 5-tuple -> process info.

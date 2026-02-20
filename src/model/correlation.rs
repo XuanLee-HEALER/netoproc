@@ -287,6 +287,7 @@ pub fn correlate(
         interfaces,
         processes,
         dns,
+        unknown_details: Vec::new(),
     }
 }
 

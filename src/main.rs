@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -15,9 +15,13 @@ use netoproc::bpf::BpfCapture;
 use netoproc::bpf::dns::DnsMessage;
 use netoproc::bpf::packet::PacketSummary;
 use netoproc::cli::Cli;
+use netoproc::enrichment;
+use netoproc::enrichment::dns_resolver::ReverseDnsResolver;
 use netoproc::error::NetopError;
 use netoproc::model::Direction;
-use netoproc::model::traffic::{ProcessKey, ProcessTable, TrafficStats, lookup_process};
+use netoproc::model::traffic::{
+    ConnectionStats, ProcessKey, ProcessTable, StatsState, lookup_process,
+};
 use netoproc::output;
 use netoproc::privilege;
 use netoproc::state::{self, merge};
@@ -244,9 +248,22 @@ fn run_snapshot(
 ) -> Result<(), NetopError> {
     let duration = Duration::from_secs_f64(cli.snapshot_duration());
     let start = Instant::now();
-    let mut stats: HashMap<ProcessKey, TrafficStats> = HashMap::new();
+    let mut state = StatsState::default();
     let mut batch_count: u64 = 0;
     let mut packet_count: u64 = 0;
+
+    // Create reverse DNS resolver (2 workers).
+    let mut resolver = if !cli.no_dns {
+        match ReverseDnsResolver::new(2) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log::warn!("Failed to create DNS resolver: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Accumulate traffic stats for the specified duration.
     while start.elapsed() < duration {
@@ -257,10 +274,18 @@ fn run_snapshot(
             Ok(batch) => {
                 batch_count += 1;
                 packet_count += batch.len() as u64;
-                accumulate_batch(&batch, process_table, &mut stats);
+                accumulate_batch(&batch, process_table, &mut state);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        // Trigger DNS lookups for new Unknown remotes.
+        if let Some(ref mut resolver) = resolver {
+            resolver.collect_results();
+            for addr in state.unknown_by_remote.keys() {
+                resolver.lookup(addr.ip());
+            }
         }
     }
 
@@ -268,31 +293,43 @@ fn run_snapshot(
         "Accumulation: {} batches, {} packets, {} processes in {:.1}s",
         batch_count,
         packet_count,
-        stats.len(),
+        state.by_process.len(),
         start.elapsed().as_secs_f64()
     );
 
     // Drain remaining packets: signal BPF threads, join, drain channel.
-    drain_final(&pkt_rx, process_table, &mut stats, bpf_handles);
+    drain_final(&pkt_rx, process_table, &mut state, bpf_handles);
+
+    // Wait for in-flight DNS queries (2-second grace period).
+    if let Some(ref mut resolver) = resolver {
+        resolver.wait_for_pending(Duration::from_secs(2));
+        // Apply resolved hostnames to ConnectionStats.
+        for (addr, conn) in &mut state.unknown_by_remote {
+            if let Some(result) = resolver.get_result(&addr.ip()) {
+                conn.rdns = Some(result.map(|s| s.to_string()));
+            }
+        }
+    }
 
     log::info!(
         "After drain: {} processes, {} total entries",
-        stats.len(),
-        stats
+        state.by_process.len(),
+        state
+            .by_process
             .values()
             .map(|s| s.rx_packets + s.tx_packets)
             .sum::<u64>()
     );
 
     // Output results.
-    output::write_snapshot(&stats, cli.format, &mut io::stdout().lock())
+    output::write_snapshot(&state, cli.format, &mut io::stdout().lock())
 }
 
 /// Signal BPF threads to stop, join them, then drain any remaining packets.
 fn drain_final(
     pkt_rx: &mpsc::Receiver<Vec<PacketSummary>>,
     process_table: &Arc<ArcSwap<ProcessTable>>,
-    stats: &mut HashMap<ProcessKey, TrafficStats>,
+    state: &mut StatsState,
     bpf_handles: Vec<thread::JoinHandle<()>>,
 ) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
@@ -304,15 +341,18 @@ fn drain_final(
 
     // Drain remaining packets from channel.
     while let Ok(batch) = pkt_rx.try_recv() {
-        accumulate_batch(&batch, process_table, stats);
+        accumulate_batch(&batch, process_table, state);
     }
 }
 
 /// Attribute a batch of packets to processes and accumulate traffic stats.
+///
+/// For packets attributed to `ProcessKey::Unknown`, additionally groups by
+/// remote address with IP/port annotations.
 fn accumulate_batch(
     batch: &[PacketSummary],
     process_table: &Arc<ArcSwap<ProcessTable>>,
-    stats: &mut HashMap<ProcessKey, TrafficStats>,
+    state: &mut StatsState,
 ) {
     let table = process_table.load();
     for pkt in batch {
@@ -323,7 +363,35 @@ fn accumulate_batch(
             },
             None => ProcessKey::Unknown,
         };
-        stats.entry(key).or_default().add(pkt);
+
+        // For Unknown packets, also group by remote address.
+        if key == ProcessKey::Unknown {
+            let remote = determine_remote_addr(pkt);
+            let conn = state
+                .unknown_by_remote
+                .entry(remote)
+                .or_insert_with(|| ConnectionStats {
+                    protocol: pkt.protocol,
+                    annotation: enrichment::get_annotation(remote, pkt.protocol),
+                    ..Default::default()
+                });
+            match pkt.direction {
+                Direction::Inbound => conn.rx_bytes += pkt.ip_len as u64,
+                Direction::Outbound => conn.tx_bytes += pkt.ip_len as u64,
+            }
+        }
+
+        state.by_process.entry(key).or_default().add(pkt);
+    }
+}
+
+/// Determine the remote address from a packet based on direction.
+///
+/// For inbound traffic the remote is the source; for outbound it's the destination.
+fn determine_remote_addr(pkt: &PacketSummary) -> SocketAddr {
+    match pkt.direction {
+        Direction::Inbound => SocketAddr::new(pkt.src_ip, pkt.src_port),
+        Direction::Outbound => SocketAddr::new(pkt.dst_ip, pkt.dst_port),
     }
 }
 
@@ -373,14 +441,28 @@ fn run_monitor(
 ///
 /// Drains packet batches, flattens them, polls system APIs, and uses the old
 /// merge path to build `SystemNetworkState` for TUI compatibility.
-/// Phase 7 will replace this with direct `TrafficStats` rendering in the TUI.
+/// Additionally tracks Unknown traffic per-remote-address with DNS resolution.
 fn monitor_stats_loop(
     pkt_rx: mpsc::Receiver<Vec<PacketSummary>>,
     dns_rx: &Receiver<DnsMessage>,
-    _process_table: &Arc<ArcSwap<ProcessTable>>,
+    process_table: &Arc<ArcSwap<ProcessTable>>,
     shared_state: &state::SharedState,
 ) {
+    use netoproc::model::UnknownRemoteEntry;
+
     let ticker = crossbeam_channel::tick(Duration::from_secs(1));
+
+    // Unknown traffic per-remote tracking (cumulative across ticks).
+    let mut unknown_state = StatsState::default();
+
+    // Create reverse DNS resolver for monitor mode.
+    let mut resolver = match ReverseDnsResolver::new(2) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            log::warn!("Failed to create DNS resolver for monitor mode: {e}");
+            None
+        }
+    };
 
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
@@ -400,6 +482,36 @@ fn monitor_stats_loop(
                 Ok(batch) => packets.extend(batch),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+
+        // Accumulate Unknown traffic per-remote from this tick's packets.
+        if !packets.is_empty() {
+            let table = process_table.load();
+            for pkt in &packets {
+                if lookup_process(&table, pkt).is_none() {
+                    let remote = determine_remote_addr(pkt);
+                    let conn = unknown_state
+                        .unknown_by_remote
+                        .entry(remote)
+                        .or_insert_with(|| ConnectionStats {
+                            protocol: pkt.protocol,
+                            annotation: enrichment::get_annotation(remote, pkt.protocol),
+                            ..Default::default()
+                        });
+                    match pkt.direction {
+                        Direction::Inbound => conn.rx_bytes += pkt.ip_len as u64,
+                        Direction::Outbound => conn.tx_bytes += pkt.ip_len as u64,
+                    }
+                }
+            }
+        }
+
+        // Trigger DNS lookups and collect results.
+        if let Some(ref mut r) = resolver {
+            r.collect_results();
+            for addr in unknown_state.unknown_by_remote.keys() {
+                r.lookup(addr.ip());
             }
         }
 
@@ -424,7 +536,7 @@ fn monitor_stats_loop(
 
         // Build state using old merge path (TUI compatibility bridge).
         let prev = shared_state.load();
-        let new_state = merge::merge_into_state(
+        let mut new_state = merge::merge_into_state(
             &prev,
             &raw.processes,
             &raw.tcp_connections,
@@ -434,6 +546,39 @@ fn monitor_stats_loop(
             &packets,
             &dns_messages,
         );
+
+        // Build unknown_details for TUI (sorted by traffic, top 10).
+        let mut details: Vec<_> = unknown_state
+            .unknown_by_remote
+            .iter()
+            .map(|(addr, conn)| {
+                let rdns = resolver
+                    .as_ref()
+                    .and_then(|r| r.get_result(&addr.ip()))
+                    .and_then(|r| r.map(|s| s.to_string()));
+                let display_addr = if let Some(ref hostname) = rdns {
+                    format!("{hostname}:{}", addr.port())
+                } else {
+                    addr.to_string()
+                };
+                UnknownRemoteEntry {
+                    remote_addr: display_addr,
+                    rx_bytes: conn.rx_bytes,
+                    tx_bytes: conn.tx_bytes,
+                    rdns,
+                    annotation: conn.annotation.clone(),
+                    protocol: conn.protocol,
+                }
+            })
+            .collect();
+        details.sort_by(|a, b| {
+            let total_a = a.rx_bytes + a.tx_bytes;
+            let total_b = b.rx_bytes + b.tx_bytes;
+            total_b.cmp(&total_a)
+        });
+        details.truncate(10);
+        new_state.unknown_details = details;
+
         shared_state.store(Arc::new(new_state));
     }
 }

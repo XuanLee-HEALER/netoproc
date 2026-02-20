@@ -51,6 +51,9 @@ struct ProcessRow {
 ///
 /// Columns: PID | Process | User | Sockets | Conns | RX Rate | TX Rate | RX Total | TX Total
 ///
+/// When `state.unknown_details` is non-empty, an "unknown (system)" aggregate row
+/// is appended, followed by dimmed sub-rows showing per-remote-address breakdown.
+///
 /// `filter` is a case-insensitive substring match on the process name.
 /// `selected` is the zero-based index of the highlighted row.
 pub fn render(
@@ -136,8 +139,9 @@ pub fn render(
         .bg(Color::DarkGray)
         .add_modifier(Modifier::BOLD);
     let normal_style = Style::default();
+    let dimmed_style = Style::default().fg(Color::DarkGray);
 
-    let table_rows: Vec<Row> = rows
+    let mut table_rows: Vec<Row> = rows
         .iter()
         .enumerate()
         .map(|(i, r)| {
@@ -160,6 +164,51 @@ pub fn render(
             .style(style)
         })
         .collect();
+
+    // Append Unknown traffic detail rows if available.
+    if !state.unknown_details.is_empty() && (filter.is_empty() || "unknown".contains(&filter_lower))
+    {
+        // Aggregate row for unknown (system) traffic.
+        let total_rx: u64 = state.unknown_details.iter().map(|e| e.rx_bytes).sum();
+        let total_tx: u64 = state.unknown_details.iter().map(|e| e.tx_bytes).sum();
+        table_rows.push(
+            Row::new(vec![
+                Cell::from("-"),
+                Cell::from("unknown (system)"),
+                Cell::from("-"),
+                Cell::from("-"),
+                Cell::from(state.unknown_details.len().to_string()),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(fmt_bytes(total_rx)),
+                Cell::from(fmt_bytes(total_tx)),
+            ])
+            .style(normal_style),
+        );
+
+        // Indented sub-rows for each remote address.
+        for entry in &state.unknown_details {
+            let label = if let Some(ref ann) = entry.annotation {
+                ann.as_str()
+            } else {
+                ""
+            };
+            table_rows.push(
+                Row::new(vec![
+                    Cell::from(""),
+                    Cell::from(format!("  {}", entry.remote_addr)),
+                    Cell::from(label.to_string()),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(""),
+                    Cell::from(fmt_bytes(entry.rx_bytes)),
+                    Cell::from(fmt_bytes(entry.tx_bytes)),
+                ])
+                .style(dimmed_style),
+            );
+        }
+    }
 
     let widths = [
         ratatui::layout::Constraint::Length(8),  // PID
