@@ -69,8 +69,9 @@ fn install_signal_handlers() {
         }
     }
 
-    unsafe {
-        SetConsoleCtrlHandler(Some(ctrl_handler), 1);
+    let ret = unsafe { SetConsoleCtrlHandler(Some(ctrl_handler), 1) };
+    if ret == 0 {
+        log::warn!("SetConsoleCtrlHandler failed");
     }
 }
 

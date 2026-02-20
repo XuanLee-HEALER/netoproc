@@ -341,7 +341,10 @@ impl RawSocketCapture {
                     return false;
                 }
                 let next_hdr = data[6];
-                matches!(next_hdr, 6 | 17 | 58) // TCP, UDP, ICMPv6
+                // Skip extension headers to find the actual transport protocol
+                let (final_proto, _) =
+                    packet::skip_ipv6_extension_headers(next_hdr, &data[40..]);
+                matches!(final_proto, 6 | 17 | 58) // TCP, UDP, ICMPv6
             }
             _ => false,
         }

@@ -200,13 +200,19 @@ fn get_tcp4_table() -> Option<Vec<TcpRow4>> {
     };
 
     if ret != 0 {
+        log::warn!("GetExtendedTcpTable(AF_INET) failed: error {ret}");
         return None;
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-        as *const MIB_TCPROW_OWNER_PID;
+    let header_size = std::mem::size_of::<u32>();
+    let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+    if header_size + count * row_size > buffer.len() {
+        log::warn!("TCP4 table: dwNumEntries ({count}) exceeds buffer capacity");
+        return None;
+    }
+    let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCPROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -253,13 +259,19 @@ fn get_tcp6_table() -> Option<Vec<TcpRow6>> {
     };
 
     if ret != 0 {
+        log::warn!("GetExtendedTcpTable(AF_INET6) failed: error {ret}");
         return None;
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-        as *const MIB_TCP6ROW_OWNER_PID;
+    let header_size = std::mem::size_of::<u32>();
+    let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+    if header_size + count * row_size > buffer.len() {
+        log::warn!("TCP6 table: dwNumEntries ({count}) exceeds buffer capacity");
+        return None;
+    }
+    let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCP6ROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -306,13 +318,19 @@ fn get_udp4_table() -> Option<Vec<UdpRow4>> {
     };
 
     if ret != 0 {
+        log::warn!("GetExtendedUdpTable(AF_INET) failed: error {ret}");
         return None;
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-        as *const MIB_UDPROW_OWNER_PID;
+    let header_size = std::mem::size_of::<u32>();
+    let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+    if header_size + count * row_size > buffer.len() {
+        log::warn!("UDP4 table: dwNumEntries ({count}) exceeds buffer capacity");
+        return None;
+    }
+    let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDPROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -357,13 +375,19 @@ fn get_udp6_table() -> Option<Vec<UdpRow6>> {
     };
 
     if ret != 0 {
+        log::warn!("GetExtendedUdpTable(AF_INET6) failed: error {ret}");
         return None;
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-        as *const MIB_UDP6ROW_OWNER_PID;
+    let header_size = std::mem::size_of::<u32>();
+    let row_size = std::mem::size_of::<MIB_UDP6ROW_OWNER_PID>();
+    if header_size + count * row_size > buffer.len() {
+        log::warn!("UDP6 table: dwNumEntries ({count}) exceeds buffer capacity");
+        return None;
+    }
+    let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDP6ROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -382,7 +406,7 @@ fn get_udp6_table() -> Option<Vec<UdpRow6>> {
 // ---------------------------------------------------------------------------
 
 /// Build a PID → process name mapping using CreateToolhelp32Snapshot.
-fn build_pid_name_map() -> HashMap<u32, String> {
+pub(crate) fn build_pid_name_map() -> HashMap<u32, String> {
     let mut map = HashMap::new();
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
@@ -409,9 +433,57 @@ fn build_pid_name_map() -> HashMap<u32, String> {
 }
 
 /// Convert PROCESSENTRY32.szExeFile (i8/u8 array) to a Rust String.
-fn exe_file_to_string(bytes: &[i8]) -> String {
+pub(crate) fn exe_file_to_string(bytes: &[i8]) -> String {
     let as_u8: &[u8] =
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
     let len = as_u8.iter().position(|&b| b == 0).unwrap_or(as_u8.len());
     String::from_utf8_lossy(&as_u8[..len]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exe_file_normal_name() {
+        let mut buf = [0i8; 260];
+        for (i, &b) in b"notepad.exe".iter().enumerate() {
+            buf[i] = b as i8;
+        }
+        assert_eq!(exe_file_to_string(&buf), "notepad.exe");
+    }
+
+    #[test]
+    fn exe_file_empty() {
+        let buf = [0i8; 260];
+        assert_eq!(exe_file_to_string(&buf), "");
+    }
+
+    #[test]
+    fn exe_file_max_path() {
+        // Fill with 'A' up to MAX_PATH-1, then null
+        let mut buf = [0x41i8; 260];
+        buf[259] = 0;
+        assert_eq!(exe_file_to_string(&buf).len(), 259);
+    }
+
+    #[test]
+    fn port_conversion_roundtrip() {
+        // Verify the port byte-order conversion for known ports
+        for port in [0u16, 1, 22, 53, 80, 443, 8080, 8443, 65535] {
+            // Simulate how Windows stores the port: network byte order in DWORD
+            let be_bytes = port.to_be_bytes();
+            let dw = u32::from_ne_bytes([be_bytes[0], be_bytes[1], 0, 0]);
+            let result = u16::from_be_bytes((dw as u16).to_ne_bytes());
+            assert_eq!(result, port, "port {port} roundtrip failed");
+        }
+    }
+
+    #[test]
+    fn build_process_table_does_not_panic() {
+        // On Windows, this calls real APIs. On non-Windows, this test
+        // only compiles when targeting Windows.
+        let table = build_process_table();
+        let _ = table;
+    }
 }

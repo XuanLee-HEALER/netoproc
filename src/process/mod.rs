@@ -17,6 +17,6 @@ pub(crate) mod linux;
 pub use linux::build_process_table;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::build_process_table;

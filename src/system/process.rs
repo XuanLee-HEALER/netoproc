@@ -712,7 +712,6 @@ mod windows_impl {
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID,
         MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
@@ -720,10 +719,6 @@ mod windows_impl {
         MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
     };
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
-        TH32CS_SNAPPROCESS,
-    };
 
     pub fn list_processes() -> Result<Vec<RawProcess>, NetopError> {
         let pid_names = build_pid_name_map();
@@ -870,13 +865,19 @@ mod windows_impl {
             )
         };
         if ret != 0 {
+            log::warn!("GetExtendedTcpTable(AF_INET) failed: error {ret}");
             return None;
         }
 
         let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
         let count = table.dwNumEntries as usize;
-        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-            as *const MIB_TCPROW_OWNER_PID;
+        let header_size = std::mem::size_of::<u32>();
+        let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+        if header_size + count * row_size > buffer.len() {
+            log::warn!("TCP4 table: dwNumEntries ({count}) exceeds buffer capacity");
+            return None;
+        }
+        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCPROW_OWNER_PID;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -913,13 +914,19 @@ mod windows_impl {
             )
         };
         if ret != 0 {
+            log::warn!("GetExtendedTcpTable(AF_INET6) failed: error {ret}");
             return None;
         }
 
         let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
         let count = table.dwNumEntries as usize;
-        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-            as *const MIB_TCP6ROW_OWNER_PID;
+        let header_size = std::mem::size_of::<u32>();
+        let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
+        if header_size + count * row_size > buffer.len() {
+            log::warn!("TCP6 table: dwNumEntries ({count}) exceeds buffer capacity");
+            return None;
+        }
+        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCP6ROW_OWNER_PID;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -956,13 +963,19 @@ mod windows_impl {
             )
         };
         if ret != 0 {
+            log::warn!("GetExtendedUdpTable(AF_INET) failed: error {ret}");
             return None;
         }
 
         let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
         let count = table.dwNumEntries as usize;
-        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-            as *const MIB_UDPROW_OWNER_PID;
+        let header_size = std::mem::size_of::<u32>();
+        let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+        if header_size + count * row_size > buffer.len() {
+            log::warn!("UDP4 table: dwNumEntries ({count}) exceeds buffer capacity");
+            return None;
+        }
+        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDPROW_OWNER_PID;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -999,13 +1012,19 @@ mod windows_impl {
             )
         };
         if ret != 0 {
+            log::warn!("GetExtendedUdpTable(AF_INET6) failed: error {ret}");
             return None;
         }
 
         let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
         let count = table.dwNumEntries as usize;
-        let rows_ptr = buffer.as_ptr().wrapping_add(std::mem::size_of::<u32>())
-            as *const MIB_UDP6ROW_OWNER_PID;
+        let header_size = std::mem::size_of::<u32>();
+        let row_size = std::mem::size_of::<MIB_UDP6ROW_OWNER_PID>();
+        if header_size + count * row_size > buffer.len() {
+            log::warn!("UDP6 table: dwNumEntries ({count}) exceeds buffer capacity");
+            return None;
+        }
+        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDP6ROW_OWNER_PID;
 
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
@@ -1015,34 +1034,7 @@ mod windows_impl {
     }
 
     fn build_pid_name_map() -> HashMap<u32, String> {
-        let mut map = HashMap::new();
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return map;
-        }
-
-        let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
-        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
-
-        if unsafe { Process32First(snapshot, &mut entry) } != 0 {
-            loop {
-                let name = exe_file_to_string(&entry.szExeFile);
-                map.insert(entry.th32ProcessID, name);
-                if unsafe { Process32Next(snapshot, &mut entry) } == 0 {
-                    break;
-                }
-            }
-        }
-
-        unsafe { CloseHandle(snapshot) };
-        map
-    }
-
-    fn exe_file_to_string(bytes: &[i8]) -> String {
-        let as_u8: &[u8] =
-            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
-        let len = as_u8.iter().position(|&b| b == 0).unwrap_or(as_u8.len());
-        String::from_utf8_lossy(&as_u8[..len]).into_owned()
+        crate::process::windows::build_pid_name_map()
     }
 
     pub fn build_process_table() -> crate::model::traffic::ProcessTable {
@@ -1069,6 +1061,45 @@ mod windows_impl {
             10 => SocketState::LastAck,
             11 => SocketState::TimeWait,
             _ => SocketState::Closed,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::model::SocketState;
+
+        #[test]
+        fn tcp_state_mapping_all_valid() {
+            assert_eq!(tcp_state_to_socket_state(1), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(2), SocketState::Listen);
+            assert_eq!(tcp_state_to_socket_state(3), SocketState::SynSent);
+            assert_eq!(tcp_state_to_socket_state(4), SocketState::SynReceived);
+            assert_eq!(tcp_state_to_socket_state(5), SocketState::Established);
+            assert_eq!(tcp_state_to_socket_state(6), SocketState::FinWait1);
+            assert_eq!(tcp_state_to_socket_state(7), SocketState::FinWait2);
+            assert_eq!(tcp_state_to_socket_state(8), SocketState::CloseWait);
+            assert_eq!(tcp_state_to_socket_state(9), SocketState::Closing);
+            assert_eq!(tcp_state_to_socket_state(10), SocketState::LastAck);
+            assert_eq!(tcp_state_to_socket_state(11), SocketState::TimeWait);
+        }
+
+        #[test]
+        fn tcp_state_delete_tcb() {
+            assert_eq!(tcp_state_to_socket_state(12), SocketState::Closed);
+        }
+
+        #[test]
+        fn tcp_state_unknown() {
+            assert_eq!(tcp_state_to_socket_state(0), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(13), SocketState::Closed);
+            assert_eq!(tcp_state_to_socket_state(-1), SocketState::Closed);
+        }
+
+        #[test]
+        fn list_processes_does_not_panic() {
+            let result = list_processes();
+            assert!(result.is_ok());
         }
     }
 }
