@@ -5,9 +5,6 @@ edition = "2021"
 description = "Shared types between netoproc eBPF kernel programs and userspace"
 publish = false
 
-[features]
-default = []
-user = ["aya"]
-
+# No external dependencies — #![no_std] compatible.
+# Phase 2: add optional aya dependency for Pod trait impls.
 [dependencies]
-aya = { version = "0.13", optional = true }

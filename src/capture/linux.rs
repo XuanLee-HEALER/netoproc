@@ -103,7 +103,10 @@ impl AfPacketCapture {
         // 3. Bind to interface
         let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
-        sll.sll_protocol = ETH_P_ALL.to_be();
+        #[allow(clippy::unnecessary_cast)]
+        {
+            sll.sll_protocol = (ETH_P_ALL as u16).to_be();
+        }
         sll.sll_ifindex = if_index as i32;
 
         let ret = unsafe {
@@ -489,13 +492,13 @@ fn open_afpacket_devices(
 
 /// Attempt to open eBPF capture devices.
 ///
-/// If `allow_fallback` is true, errors are returned as Err (caller handles fallback).
-/// If `allow_fallback` is false (forced ebpf mode), errors are fatal.
+/// The `_allow_fallback` parameter is reserved for Phase 2, where it will
+/// control whether eBPF load failures are fatal or trigger AF_PACKET fallback.
 #[cfg(feature = "ebpf")]
 fn try_open_ebpf(
     interfaces: &[String],
-    buffer_size: u32,
-    dns_enabled: bool,
+    _buffer_size: u32,
+    _dns_enabled: bool,
     _allow_fallback: bool,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
     // Phase 1: EbpfCapture::try_new() always returns Err (stub).
@@ -504,16 +507,15 @@ fn try_open_ebpf(
         .first()
         .ok_or_else(|| NetopError::EbpfProgram("no interfaces to monitor".to_string()))?;
 
-    // Try to create eBPF capture — Phase 1 stub will fail here.
+    // Try to create eBPF capture — Phase 1 stub returns Err here.
     let _ebpf = super::ebpf::EbpfCapture::try_new(iface)?;
 
     // Phase 2: When eBPF works, the traffic capture thread will poll BPF maps
     // instead of reading raw packets. DNS still uses AF_PACKET since kprobes
     // don't capture packet content.
-    //
-    // For now, unreachable due to stub.
-    let _ = (buffer_size, dns_enabled);
-    unreachable!("eBPF stub should have returned Err above")
+    Err(NetopError::EbpfProgram(
+        "eBPF capture device construction not yet implemented".to_string(),
+    ))
 }
 
 /// Get capture statistics (Linux has no kernel-level BPF stats).

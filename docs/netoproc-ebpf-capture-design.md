@@ -1,113 +1,116 @@
-# eBPF Capture Mode 设计文档
+# eBPF Capture Mode Design Document
 
-> 基于 netoproc-ebpf-linux-research.md 调研结论，描述在 Linux 端新增 eBPF kprobe 抓包模式的完整设计。
-> 供 code agent 直接实现使用。
-
----
-
-## 1. 设计目标
-
-1. 新增 `--capture-mode=auto|ebpf|afpacket` CLI 选项（Linux only，macOS 忽略）
-2. eBPF 模式通过 kprobe 挂载到 socket 层函数，在内核态直接获取 PID + 字节数
-3. AF_PACKET 保留作为回退方案和 DNS 包捕获手段
-4. Aya 作为 eBPF 框架，纯 Rust，无 C 工具链依赖
-5. 通过 Cargo feature flag `ebpf` 控制，可选编译
-
-### 1.1 安全性原则
-
-- eBPF 程序仅使用 **kprobe**（最保守的挂载方式），不使用 XDP/TC
-- kprobe 只读取内核数据，**不修改**任何网络包或内核状态
-- eBPF 程序加载失败时**静默回退**到 AF_PACKET，不中断服务
-- 所有 eBPF map 操作设置合理的大小上限，防止内存膨胀
-- 严格遵守 capability 最小权限原则
+> Based on the findings from netoproc-ebpf-linux-research.md, this document describes the complete design for adding an eBPF kprobe-based packet capture mode on Linux.
+> Intended for direct use by a code agent during implementation.
 
 ---
 
-## 2. 架构概览
+## 1. Design Goals
 
-### 2.1 运行时模式选择
+1. Add a `--capture-mode=auto|ebpf|afpacket` CLI option (Linux only; ignored on macOS)
+2. eBPF mode attaches kprobes to socket-layer functions to obtain PID + byte counts directly in kernel space
+3. AF_PACKET is retained as both a fallback mechanism and the means for DNS packet capture
+4. Pure Rust eBPF framework with no C toolchain dependency (framework TBD for Phase 2; see Section 10)
+5. Controlled via the `ebpf` Cargo feature flag for optional compilation
+
+### 1.1 Safety Principles
+
+- The eBPF program uses only **kprobe** (the most conservative attachment method); XDP/TC are not used
+- kprobes only read kernel data and **do not modify** any network packets or kernel state
+- If eBPF program loading fails, the system **silently falls back** to AF_PACKET without service interruption
+- All eBPF map operations enforce reasonable size limits to prevent memory bloat
+- Capabilities follow the principle of least privilege
+
+---
+
+## 2. Architecture Overview
+
+### 2.1 Runtime Mode Selection
 
 ```
 CLI: --capture-mode=auto (default on Linux)
-         │
-         ▼
-┌─────────────────────────┐
-│ auto 模式检测逻辑        │
-│ 1. 检查 feature "ebpf"  │
-│    是否编译进来          │
-│ 2. 检查 kernel >= 5.8   │
-│ 3. 检查 /sys/kernel/btf/│
-│    vmlinux 是否存在      │
-│ 4. 尝试加载 eBPF prog   │
-└──────┬──────────┬───────┘
-       │          │
-    成功 ▼       失败 ▼
-┌──────────┐  ┌───────────┐
-│ eBPF 模式 │  │ AF_PACKET │
-│           │  │ 模式       │
-└──────────┘  └───────────┘
+         |
+         v
++---------------------------+
+| Auto mode detection logic |
+| 1. Check if feature "ebpf"|
+|    is compiled in          |
+| 2. Check kernel >= 5.8    |
+| 3. Check /sys/kernel/btf/ |
+|    vmlinux exists          |
+| 4. Try loading eBPF prog  |
++------+-----------+--------+
+       |           |
+   success v    failure v
++----------+  +-----------+
+| eBPF     |  | AF_PACKET |
+| mode     |  | mode      |
++----------+  +-----------+
 ```
 
-### 2.2 eBPF 模式线程模型
+### 2.2 eBPF Mode Thread Model
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  Main Thread (Stats + TUI)                             │
-│  - 从 BPF map 读取 per-PID 流量统计                     │
-│  - 或从 ring buffer 接收事件                             │
-│  - 不再需要 /proc 轮询做进程归因                          │
-└────────────────────┬───────────────────────────────────┘
-          ▲ sync_channel(8) Vec<PacketSummary>
-          │                 ▲ ArcSwap load
-┌─────────┴──────────┐   ┌──┴─────────────────┐
-│  eBPF Poller Thread │   │ Process Refresh    │
-│  (替代 capture thd) │   │ (500ms, 仅补充     │
-│                     │   │  进程名等元信息)    │
-│  周期性读取 BPF map │   │                    │
-│  转换为 PacketSumm  │   │                    │
-│  ary + PID 信息     │   │                    │
-└─────────────────────┘   └────────────────────┘
++--------------------------------------------------------+
+|  Main Thread (Stats + TUI)                             |
+|  - Reads per-PID traffic stats from BPF maps           |
+|  - Or receives events from ring buffer                 |
+|  - No longer needs /proc polling for process           |
+|    attribution                                         |
++--------------------+-----------------------------------+
+          ^ sync_channel(8) Vec<PacketSummary>
+          |                 ^ ArcSwap load
++---------+----------+   +--+---------------------+
+|  eBPF Poller Thread |   | Process Refresh       |
+|  (replaces capture  |   | (500ms, only provides |
+|   thread)           |   |  supplemental process |
+|                     |   |  metadata: name, path)|
+|  Periodically reads |   |                       |
+|  BPF maps and       |   |                       |
+|  converts to        |   |                       |
+|  PacketSummary+PID  |   |                       |
++---------------------+   +-----------------------+
 
-DNS 捕获线程（AF_PACKET port 53 filter，不变）
+DNS capture thread (AF_PACKET port 53 filter, unchanged)
 ```
 
-### 2.3 eBPF 模式 vs AF_PACKET 模式对比
+### 2.3 eBPF Mode vs AF_PACKET Mode Comparison
 
-| 组件 | AF_PACKET 模式 | eBPF 模式 |
-|------|---------------|-----------|
-| 包捕获 | `recvfrom(AF_PACKET)` | kprobe on `tcp_sendmsg` 等 |
-| 进程归因 | `/proc` 轮询 (500ms 竞态) | 内核态 `bpf_get_current_pid_tgid()` |
-| 数据传输 | raw frame → userspace | BPF map (聚合统计) 或 ring buffer (事件) |
-| DNS | AF_PACKET port 53 filter | 保持 AF_PACKET（eBPF kprobe 无包内容） |
-| 方向判断 | local IP 匹配 | `tcp_sendmsg`=出站, `tcp_recvmsg`=入站 |
-| ProcessTable | 每 500ms 全量重建 | 仅用于补充进程名/路径等元信息 |
+| Component | AF_PACKET Mode | eBPF Mode |
+|-----------|---------------|-----------|
+| Packet capture | `recvfrom(AF_PACKET)` | kprobe on `tcp_sendmsg`, etc. |
+| Process attribution | `/proc` polling (500ms race window) | Kernel-space `bpf_get_current_pid_tgid()` |
+| Data transfer | Raw frame to userspace | BPF PerCpuHashMap (aggregated stats) or ring buffer (events) |
+| DNS | AF_PACKET port 53 filter | Retains AF_PACKET (eBPF kprobes cannot access packet content) |
+| Direction detection | Local IP matching | `tcp_sendmsg` = outbound, `tcp_recvmsg` = inbound |
+| ProcessTable | Full rebuild every 500ms | Used only for supplemental metadata (process name, path, etc.) |
 
 ---
 
-## 3. eBPF 程序设计
+## 3. eBPF Program Design
 
-### 3.1 挂载点
+### 3.1 Attachment Points
 
-使用 kprobe 挂载到以下内核函数：
+kprobes are attached to the following kernel functions:
 
-| 函数 | kprobe/kretprobe | 获取数据 | 说明 |
-|------|-----------------|---------|------|
-| `tcp_sendmsg` | kprobe | PID, sock 5-tuple, 请求长度 | TCP 出站字节 |
-| `tcp_recvmsg` | kretprobe | PID, sock 5-tuple, 返回值(实际字节) | TCP 入站字节 |
-| `udp_sendmsg` | kprobe | PID, sock 5-tuple, 请求长度 | UDP 出站字节 |
-| `udp_recvmsg` | kretprobe | PID, sock 5-tuple, 返回值 | UDP 入站字节 |
+| Function | kprobe/kretprobe | Data Obtained | Description |
+|----------|-----------------|---------------|-------------|
+| `tcp_sendmsg` | kprobe | PID, sock 5-tuple, requested length | TCP outbound bytes |
+| `tcp_recvmsg` | kretprobe | PID, sock 5-tuple, return value (actual bytes) | TCP inbound bytes |
+| `udp_sendmsg` | kprobe | PID, sock 5-tuple, requested length | UDP outbound bytes |
+| `udp_recvmsg` | kretprobe | PID, sock 5-tuple, return value | UDP inbound bytes |
 
-**为什么选 kprobe 而非 tracepoint**：
-- `tcp_sendmsg`/`tcp_recvmsg` 没有稳定的 tracepoint
-- kprobe 在 kernel 4.1+ 即可用，兼容性更好
-- 虽然 kprobe 挂载的内核函数签名可能跨版本变化，但这几个函数的签名极其稳定
+**Why kprobe instead of tracepoint**:
+- `tcp_sendmsg`/`tcp_recvmsg` do not have stable tracepoints
+- kprobes are available since kernel 4.1+, offering better compatibility
+- While kprobe-attached kernel function signatures may change across versions, these particular functions have extremely stable signatures
 
-### 3.2 数据结构
+### 3.2 Data Structures
 
-#### eBPF 侧（内核态）
+#### eBPF Side (Kernel Space)
 
 ```rust
-// 流量事件 key：标识一个 (PID, 协议, 方向) 组合
+// Traffic event key: identifies a (PID, protocol, direction) combination
 #[repr(C)]
 pub struct TrafficKey {
     pub pid: u32,
@@ -116,7 +119,7 @@ pub struct TrafficKey {
     pub _pad: [u8; 2],
 }
 
-// 流量事件 value：累计字节和包数
+// Traffic event value: accumulated bytes and packet count
 #[repr(C)]
 pub struct TrafficValue {
     pub bytes: u64,
@@ -124,43 +127,54 @@ pub struct TrafficValue {
 }
 ```
 
-#### BPF Map
+#### BPF Maps
 
 ```rust
-// HashMap: TrafficKey → TrafficValue
-// 容量上限: 16384 entries（保守估计，约 2048 进程 × 2 协议 × 2 方向 × 2 余量）
+// PerCpuHashMap: TrafficKey -> TrafficValue
+// Capacity limit: 16384 entries (conservative estimate: ~2048 processes x 2 protocols x 2 directions x 2 headroom)
+//
+// PerCpuHashMap is used instead of HashMap to eliminate data races on multi-CPU
+// systems. Each CPU has its own independent copy of each value, so concurrent
+// increments from different CPUs never conflict. No locks or atomic operations
+// are needed in the eBPF program. Userspace sums across all CPU copies when
+// reading the map.
 #[map]
-static TRAFFIC_MAP: HashMap<TrafficKey, TrafficValue> = HashMap::with_max_entries(16384, 0);
+static TRAFFIC_MAP: PerCpuHashMap<TrafficKey, TrafficValue> =
+    PerCpuHashMap::with_max_entries(16384, 0);
 
-// PID → comm 映射（进程名缓存，减少 /proc 读取）
+// PID -> comm mapping (process name cache, reduces /proc reads)
+// PerCpuHashMap avoids contention; userspace reads any CPU's copy.
 #[map]
-static PID_COMM: HashMap<u32, [u8; 16]> = HashMap::with_max_entries(4096, 0);
+static PID_COMM: PerCpuHashMap<u32, [u8; 16]> =
+    PerCpuHashMap::with_max_entries(4096, 0);
 ```
 
-### 3.3 kprobe 处理逻辑（伪代码）
+### 3.3 kprobe Handler Logic (Pseudocode)
 
 ```rust
 // tcp_sendmsg kprobe
 fn tcp_sendmsg_probe(ctx: ProbeContext) -> u32 {
     let pid = bpf_get_current_pid_tgid() >> 32;
-    let sock: *const sock = ctx.arg(0);  // 第一个参数是 struct sock*
-    let size: usize = ctx.arg(2);        // 第三个参数是发送长度
+    let sock: *const sock = ctx.arg(0);  // First argument is struct sock*
+    let size: usize = ctx.arg(2);        // Third argument is send length
 
-    // 读取进程名
+    // Read process name
     let mut comm = [0u8; 16];
     bpf_get_current_comm(&mut comm);
 
-    // 更新 PID_COMM map
+    // Update PID_COMM map
     PID_COMM.insert(&(pid as u32), &comm, 0);
 
-    // 更新 TRAFFIC_MAP
+    // Update TRAFFIC_MAP
     let key = TrafficKey {
         pid: pid as u32,
         proto: 6, // TCP
         direction: 0, // TX
         _pad: [0; 2],
     };
-    // 原子增量：读取当前值，加上本次字节数
+    // Increment: read current value and add this event's byte count.
+    // PerCpuHashMap eliminates contention — each CPU writes to its own
+    // value slot, so no locks or atomics are required.
     if let Some(val) = TRAFFIC_MAP.get_ptr_mut(&key) {
         (*val).bytes += size as u64;
         (*val).packets += 1;
@@ -169,70 +183,77 @@ fn tcp_sendmsg_probe(ctx: ProbeContext) -> u32 {
         TRAFFIC_MAP.insert(&key, &val, 0);
     }
 
-    0 // 返回 0 表示继续执行原函数
+    0 // Return 0 to continue execution of the original function
 }
 ```
 
-### 3.4 安全边界
+### 3.4 Safety Boundaries
 
-- **map 大小限制**：`TRAFFIC_MAP` 最多 16384 条目，`PID_COMM` 最多 4096 条目。
-  满时新条目插入失败但不影响正常运行，仅丢失部分统计。
-- **kprobe 只读**：不修改任何内核状态，不修改 sock 结构，不修改包内容。
-- **无循环**：eBPF 程序中没有循环，verifier 保证终止。
-- **错误处理**：所有 map 操作检查返回值，失败时 `return 0` 继续。
+- **Map size limits**: `TRAFFIC_MAP` holds at most 16384 entries; `PID_COMM` holds at most 4096 entries.
+  When full, new insertions fail silently without affecting normal operation — only some statistics are lost.
+- **kprobe is read-only**: does not modify any kernel state, sock structures, or packet contents.
+- **No loops**: the eBPF program contains no loops; the verifier guarantees termination.
+- **Error handling**: all map operations check their return values; on failure, `return 0` to continue.
 
 ---
 
-## 4. 用户态集成
+## 4. Userspace Integration
 
-### 4.1 模块结构
+### 4.1 Module Structure
 
 ```
 src/capture/
-├── mod.rs          ← 新增 CaptureMode enum + 运行时 dispatch
-├── linux.rs        ← 现有 AF_PACKET（不变）
-└── ebpf.rs         ← 新增：Aya 加载器 + BPF map 轮询器
+├── mod.rs          <- CaptureMode enum + conditional module imports
+├── linux.rs        <- AF_PACKET backend + runtime dispatch logic
+│                      (PlatformCapture type, open_capture_devices,
+│                       check_capture_access, eBPF/AF_PACKET selection)
+└── ebpf.rs         <- eBPF backend: detection + loader + BPF map poller
 
-netoproc-ebpf/      ← 新增：独立的 eBPF 程序 crate（#![no_std]）
+netoproc-ebpf/      <- Standalone eBPF program crate (#![no_std])
 ├── Cargo.toml
 └── src/
-    └── main.rs     ← kprobe eBPF 程序
+    └── main.rs     <- kprobe eBPF programs
+
+netoproc-ebpf-common/ <- Shared #[repr(C)] types between kernel and userspace
+├── Cargo.toml
+└── src/
+    └── lib.rs      <- TrafficKey, TrafficValue, constants
 ```
 
-### 4.2 capture/ebpf.rs 公开 API
+### 4.2 capture/ebpf.rs Public API
 
-eBPF 后端需要导出与 `AfPacketCapture` **相同的公开函数签名**，
-以便 `main.rs` 中的 `capture_loop` 和 `dns_capture_loop` 能无缝切换。
+The eBPF backend exports the **same public function signatures** as `AfPacketCapture`,
+so that `capture_loop` and `dns_capture_loop` in `main.rs` can switch seamlessly.
 
 ```rust
 pub struct EbpfCapture {
-    bpf: Ebpf,                    // Aya 的 eBPF 程序管理器
-    traffic_map: MapRef,          // TRAFFIC_MAP 的用户态引用
-    pid_comm_map: MapRef,         // PID_COMM 的用户态引用
+    bpf: Ebpf,                    // eBPF program manager (framework TBD)
+    traffic_map: MapRef,          // Userspace reference to TRAFFIC_MAP
+    pid_comm_map: MapRef,         // Userspace reference to PID_COMM
     interface: String,
-    poll_interval: Duration,      // 默认 500ms
-    last_snapshot: HashMap<TrafficKey, TrafficValue>, // 上次读取的快照（用于增量计算）
+    poll_interval: Duration,      // Default 500ms
+    last_snapshot: HashMap<TrafficKey, TrafficValue>, // Previous snapshot (for delta computation)
 }
 
 impl EbpfCapture {
-    /// 加载 eBPF 程序并 attach kprobes。
-    /// 失败时返回 Err，调用方可回退到 AF_PACKET。
+    /// Load the eBPF program and attach kprobes.
+    /// Returns Err on failure; the caller can fall back to AF_PACKET.
     pub fn new(interface: &str) -> Result<Self, NetopError>;
 
-    /// 轮询 BPF map，将增量数据转换为 PacketSummary 批次。
-    /// 返回的 PacketSummary 已包含正确的方向和大致字节数。
+    /// Poll BPF maps and convert delta data into a batch of PacketSummary.
+    /// The returned PacketSummary entries include correct direction and approximate byte counts.
     pub fn read_packets(&mut self, out: &mut Vec<PacketSummary>) -> Result<(), NetopError>;
     pub fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError>;
 
-    /// eBPF 模式不直接捕获 DNS 包内容，返回空 Vec。
-    /// DNS 由独立的 AF_PACKET capture 处理。
+    /// eBPF mode does not capture DNS packet content directly; returns an empty Vec.
+    /// DNS is handled by a separate AF_PACKET capture device.
     pub fn read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError>;
 
     pub fn interface(&self) -> &str;
 }
 ```
 
-### 4.3 capture/mod.rs 改造
+### 4.3 capture/mod.rs Layout
 
 ```rust
 // src/capture/mod.rs
@@ -248,104 +269,98 @@ pub use macos::*;
 
 // ---- Linux ----
 #[cfg(target_os = "linux")]
-mod linux;  // AfPacketCapture (afpacket 后端)
+mod linux;  // AfPacketCapture (AF_PACKET backend) + runtime dispatch
+#[cfg(target_os = "linux")]
+pub use linux::*;
 
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
-pub mod ebpf;  // EbpfCapture (ebpf 后端)
-
-#[cfg(target_os = "linux")]
-mod linux_dispatch;  // 运行时 dispatch：选择 afpacket 或 ebpf
-#[cfg(target_os = "linux")]
-pub use linux_dispatch::*;
+pub mod ebpf;  // EbpfCapture (eBPF backend)
 ```
 
-### 4.4 linux_dispatch.rs（运行时 dispatch）
+### 4.4 Runtime Dispatch (in linux.rs)
+
+Runtime dispatch logic lives directly in `src/capture/linux.rs` alongside the
+AF_PACKET implementation. There is no separate `linux_dispatch.rs` file.
 
 ```rust
-// src/capture/linux_dispatch.rs
+// In src/capture/linux.rs
 
 use crate::cli::CaptureMode;
 use crate::error::NetopError;
 
-/// 运行时选择的捕获后端。
-pub enum PlatformCapture {
-    AfPacket(super::linux::AfPacketCapture),
-    #[cfg(feature = "ebpf")]
-    Ebpf(super::ebpf::EbpfCapture),
-}
-
-pub fn check_capture_access() -> Result<(), NetopError> {
-    // 基础权限检查（AF_PACKET socket 探测 + eBPF 能力检测）
-    super::linux::check_capture_access()
-}
-
+/// Open capture devices for the specified interfaces.
+///
+/// The `capture_mode` parameter controls which backend to use:
+/// - `Auto`: try eBPF first (if compiled with `ebpf` feature), fall back to AF_PACKET
+/// - `Ebpf`: force eBPF, return error if unavailable
+/// - `Afpacket`: force AF_PACKET (current default behavior)
 pub fn open_capture_devices(
     interfaces: &[String],
     buffer_size: u32,
     dns_enabled: bool,
     capture_mode: CaptureMode,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
-    match resolve_capture_mode(capture_mode) {
-        ResolvedMode::Ebpf => open_ebpf_devices(interfaces, dns_enabled),
-        ResolvedMode::AfPacket => open_afpacket_devices(interfaces, buffer_size, dns_enabled),
-    }
-}
-
-/// auto 模式的检测逻辑
-fn resolve_capture_mode(mode: CaptureMode) -> ResolvedMode {
-    match mode {
-        CaptureMode::Afpacket => ResolvedMode::AfPacket,
+    match capture_mode {
         CaptureMode::Ebpf => {
             #[cfg(feature = "ebpf")]
-            { ResolvedMode::Ebpf }
+            {
+                return try_open_ebpf(interfaces, buffer_size, dns_enabled, false);
+            }
             #[cfg(not(feature = "ebpf"))]
             {
-                log::warn!("eBPF feature not compiled in, falling back to AF_PACKET");
-                ResolvedMode::AfPacket
+                return Err(NetopError::EbpfProgram(
+                    "eBPF support not compiled in (build with --features ebpf)".to_string(),
+                ));
             }
         }
         CaptureMode::Auto => {
             #[cfg(feature = "ebpf")]
             {
-                if ebpf_available() {
-                    log::info!("eBPF support detected, using eBPF capture mode");
-                    ResolvedMode::Ebpf
+                if super::ebpf::ebpf_available() {
+                    match try_open_ebpf(interfaces, buffer_size, dns_enabled, true) {
+                        Ok(result) => return Ok(result),
+                        Err(e) => {
+                            log::warn!(
+                                "eBPF initialization failed, falling back to AF_PACKET: {e}"
+                            );
+                        }
+                    }
                 } else {
-                    log::info!("eBPF not available, using AF_PACKET capture mode");
-                    ResolvedMode::AfPacket
+                    log::info!("eBPF not available on this kernel, using AF_PACKET");
                 }
             }
-            #[cfg(not(feature = "ebpf"))]
-            {
-                ResolvedMode::AfPacket
-            }
+        }
+        CaptureMode::Afpacket => {
+            // Fall through to AF_PACKET below
         }
     }
+
+    open_afpacket_devices(interfaces, buffer_size, dns_enabled)
 }
 
-/// 检测 eBPF 是否可用
+/// eBPF availability detection
 #[cfg(feature = "ebpf")]
 fn ebpf_available() -> bool {
-    // 1. 检查内核版本 >= 5.8
+    // 1. Check kernel version >= 5.8
     if !kernel_version_sufficient() {
         log::debug!("Kernel version < 5.8, eBPF not available");
         return false;
     }
-    // 2. 检查 BTF 信息
+    // 2. Check BTF info
     if !std::path::Path::new("/sys/kernel/btf/vmlinux").exists() {
         log::debug!("BTF not available (/sys/kernel/btf/vmlinux missing)");
         return false;
     }
-    // 3. 尝试 bpf() 系统调用（最可靠的检测）
+    // 3. Try bpf() syscall (most reliable detection)
     true
 }
 ```
 
 ---
 
-## 5. CLI 变更
+## 5. CLI Changes
 
-### 5.1 src/cli.rs 新增
+### 5.1 Additions to src/cli.rs
 
 ```rust
 /// Capture mode for Linux (ignored on macOS).
@@ -359,41 +374,47 @@ pub enum CaptureMode {
     Afpacket,
 }
 
-// 在 Cli struct 中新增：
+// Added to the Cli struct:
 /// Linux capture backend (ignored on macOS)
 #[arg(long = "capture-mode", default_value = "auto")]
 pub capture_mode: CaptureMode,
 ```
 
-### 5.2 main.rs 变更
+### 5.2 Changes to main.rs
 
 ```rust
-// 在 open_capture_devices 调用处传入 capture_mode：
+// Pass capture_mode to open_capture_devices:
 let (traffic_captures, dns_capture) = capture::open_capture_devices(
     &interfaces,
     cli.bpf_buffer,
     dns_enabled,
-    cli.capture_mode,  // 新增参数
+    cli.capture_mode,  // new parameter
 )?;
 ```
 
-macOS 端的 `open_capture_devices` 签名不变（忽略 `capture_mode` 或不接受此参数）。
+The macOS `open_capture_devices` signature is unchanged (it ignores `capture_mode` or does not accept the parameter).
 
 ---
 
-## 6. Cargo.toml 变更
+## 6. Cargo.toml Changes
 
 ```toml
 [features]
 default = []
-ebpf = ["dep:aya", "dep:aya-log"]
-
-[target.'cfg(target_os = "linux")'.dependencies]
-aya = { version = "0.13", optional = true }
-aya-log = { version = "0.2", optional = true }
+# Phase 1: ebpf feature enables detection code and stub backend.
+# Phase 2: will add eBPF framework dependency here once finalized.
+# Note: aya v0.13 transitively pulls in tokio, which conflicts with the
+# project's no-tokio policy. Phase 2 must either use aya without tokio,
+# choose an alternative (libbpf-rs), or formally amend the policy.
+ebpf = []
 ```
 
-**eBPF 程序 crate**（独立 workspace member）：
+No aya or aya-log dependencies are added in Phase 1. The `ebpf` feature flag
+gates only the detection code (`src/capture/ebpf.rs`) and dispatch logic.
+The eBPF framework dependency will be added in Phase 2 once the tokio
+conflict is resolved.
+
+**eBPF program crate** (standalone workspace member):
 
 ```toml
 # netoproc-ebpf/Cargo.toml
@@ -401,43 +422,69 @@ aya-log = { version = "0.2", optional = true }
 name = "netoproc-ebpf"
 version = "0.1.0"
 edition = "2021"
+description = "eBPF kernel programs for netoproc per-process network monitoring"
+publish = false
 
 [dependencies]
 aya-ebpf = "0.1"
-aya-log-ebpf = "0.1"
+netoproc-ebpf-common = { path = "../netoproc-ebpf-common" }
 
 [[bin]]
 name = "netoproc-ebpf"
 path = "src/main.rs"
+
+[profile.dev]
+opt-level = 2      # eBPF verifier needs optimized code
+panic = "abort"
+overflow-checks = false
+
+[profile.release]
+lto = true
+panic = "abort"
+overflow-checks = false
 ```
 
-eBPF ELF 字节码通过 `include_bytes_aligned!` 嵌入主程序二进制。
+**Shared types crate**:
+
+```toml
+# netoproc-ebpf-common/Cargo.toml
+[package]
+name = "netoproc-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# no_std compatible — shared between kernel and userspace
+```
+
+The eBPF ELF bytecode is embedded into the main program binary via `include_bytes_aligned!`.
 
 ---
 
-## 7. 权限模型
+## 7. Permission Model
 
-### 7.1 eBPF 模式所需 capabilities
+### 7.1 Capabilities Required for eBPF Mode
 
-| Capability | 用途 | 最低内核 |
-|-----------|------|---------|
-| `CAP_BPF` | 加载 eBPF 程序 | 5.8 |
-| `CAP_PERFMON` | attach kprobe | 5.8 |
-| `CAP_NET_RAW` | DNS AF_PACKET（如启用） | 任意 |
-| `CAP_NET_ADMIN` | 混杂模式（如启用） | 任意 |
+| Capability | Purpose | Minimum Kernel |
+|-----------|---------|---------------|
+| `CAP_BPF` | Load eBPF programs | 5.8 |
+| `CAP_PERFMON` | Attach kprobes | 5.8 |
+| `CAP_NET_RAW` | DNS AF_PACKET (if enabled) | Any |
+| `CAP_NET_ADMIN` | Promiscuous mode (if enabled) | Any |
+| `CAP_SYS_PTRACE` | Read /proc entries for other users' processes | Any |
 
-### 7.2 install-linux.sh 更新
+### 7.2 install-linux.sh Update
 
 ```bash
-# 检测内核版本，选择 capabilities 集合
+# Detect kernel version and select capability set
 KERNEL_VERSION=$(uname -r | cut -d. -f1-2)
 KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
 KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
 
 if [ "$KERNEL_MAJOR" -gt 5 ] || { [ "$KERNEL_MAJOR" -eq 5 ] && [ "$KERNEL_MINOR" -ge 8 ]; }; then
     # Kernel 5.8+: eBPF mode available
-    CAPS="cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon+eip"
-    echo "Kernel $KERNEL_VERSION supports eBPF: setting cap_bpf,cap_perfmon"
+    CAPS="cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon,cap_sys_ptrace+eip"
+    echo "Kernel $KERNEL_VERSION supports eBPF: setting cap_bpf,cap_perfmon,cap_sys_ptrace"
 else
     # Older kernel: AF_PACKET only
     CAPS="cap_net_raw,cap_net_admin,cap_sys_ptrace+eip"
@@ -449,70 +496,74 @@ setcap "$CAPS" "$BINARY"
 
 ---
 
-## 8. 错误处理
+## 8. Error Handling
 
-### 8.1 新增 error variant
+### 8.1 New Error Variant
 
 ```rust
-// src/error.rs 新增
+// Added to src/error.rs
 #[error("eBPF program error: {0}")]
 EbpfProgram(String),
 ```
 
-exit code: 映射到 2（与 CaptureDevice 同级）。
+Exit code: maps to 2 (same level as CaptureDevice).
 
-### 8.2 回退策略
+### 8.2 Fallback Strategy
 
 ```
-auto 模式:
-  1. 尝试加载 eBPF → 成功 → 使用 eBPF
-  2. 加载失败 → log::warn → 回退 AF_PACKET
-  3. AF_PACKET 也失败 → 返回错误
+auto mode:
+  1. Attempt to load eBPF -> success -> use eBPF
+  2. Load fails -> log::warn -> fall back to AF_PACKET
+  3. AF_PACKET also fails -> return error
 
-ebpf 模式 (强制):
-  1. 尝试加载 eBPF → 成功
-  2. 加载失败 → 返回 EbpfProgram 错误，不回退
+ebpf mode (forced):
+  1. Attempt to load eBPF -> success
+  2. Load fails -> return EbpfProgram error, no fallback
 
-afpacket 模式 (强制):
-  1. 使用 AF_PACKET → 成功
-  2. 失败 → 返回 CaptureDevice 错误
+afpacket mode (forced):
+  1. Use AF_PACKET -> success
+  2. Fails -> return CaptureDevice error
 ```
 
 ---
 
-## 9. 渐进式实现计划
+## 9. Incremental Implementation Plan
 
-### Phase 1：骨架搭建（本次实现）
-- [x] CLI: `--capture-mode` 选项 + `CaptureMode` enum
-- [x] `src/capture/ebpf.rs`：eBPF 后端骨架（检测 + stub 实现）
-- [x] `src/capture/linux_dispatch.rs`：运行时 dispatch
-- [x] `src/error.rs`：新增 `EbpfProgram` variant
-- [x] `Cargo.toml`：`ebpf` feature flag + aya 依赖
-- [x] `scripts/install-linux.sh`：capability 更新
-- [x] 编译验证：`cargo check` 通过
+### Phase 1: Scaffolding (current implementation)
+- [x] CLI: `--capture-mode` option + `CaptureMode` enum
+- [x] `src/capture/ebpf.rs`: eBPF backend scaffolding (detection + stub implementation)
+- [x] `src/capture/linux.rs`: runtime dispatch (eBPF/AF_PACKET selection integrated directly)
+- [x] `src/error.rs`: new `EbpfProgram` variant
+- [x] `Cargo.toml`: `ebpf` feature flag (no aya dependency; see Phase 2)
+- [x] `scripts/install-linux.sh`: capability updates
+- [x] `netoproc-ebpf/`: standalone eBPF program crate with kprobe handlers
+- [x] `netoproc-ebpf-common/`: shared `#[repr(C)]` types (TrafficKey, TrafficValue)
+- [x] Compilation verified: `cargo check` passes
 
-### Phase 2：eBPF 程序实现（后续）
-- [ ] `netoproc-ebpf/` crate：kprobe eBPF 程序
-- [ ] 实际 kprobe attach + BPF map 读取
-- [ ] 集成测试（需要 Linux 5.8+ 环境）
+### Phase 2: eBPF Program Integration (future)
+- [ ] Resolve eBPF framework dependency (aya pulls in tokio; evaluate alternatives or workaround)
+- [ ] Add eBPF framework dependency to main crate's `ebpf` feature
+- [ ] Implement actual eBPF program loading in `EbpfCapture::try_new()`
+- [ ] Implement BPF PerCpuHashMap polling in `EbpfCapture::read_packets()`
+- [ ] Integration testing (requires Linux 5.8+ environment)
 
-### Phase 3：优化与完善
-- [ ] ring buffer 替代 perf buffer
-- [ ] UDP 归因改进
-- [ ] cgroup 感知
-- [ ] 性能基准测试
+### Phase 3: Optimization and Polish
+- [ ] Ring buffer to replace perf buffer
+- [ ] UDP attribution improvements
+- [ ] cgroup awareness
+- [ ] Performance benchmarking
 
 ---
 
-## 10. 关键决策记录
+## 10. Key Decision Log
 
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| eBPF 框架 | Aya | 纯 Rust，无 C 依赖，活跃维护 |
-| 挂载方式 | kprobe | 最保守，4.1+ 可用，只读 |
-| 数据传输 | BPF HashMap (轮询) | 比 ring buffer 简单，适合聚合统计场景 |
-| DNS 捕获 | 保留 AF_PACKET | kprobe 无法获取包内容 |
-| 默认模式 | auto | 自动检测，无感知升级 |
-| Feature flag | `ebpf` (非默认) | 保守策略，用户主动 opt-in |
-| Map 大小上限 | 16384 entries | 约 2K 进程 × 8 方向/协议组合 |
-| 最低内核 | 5.8 | CAP_BPF + ring buffer + BTF 成熟 |
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| eBPF framework | TBD (Phase 2) | Aya is the preferred candidate (pure Rust, no C dependency, actively maintained), but aya v0.13 transitively pulls in tokio, which conflicts with the project's no-tokio policy. Phase 2 must resolve this conflict (use aya without tokio, switch to libbpf-rs, or formally amend the policy). |
+| Attachment method | kprobe | Most conservative approach; available since kernel 4.1+; read-only |
+| Data transfer | BPF PerCpuHashMap (polling) | Eliminates data races on multi-CPU systems without locks or atomics. Each CPU has its own value copy; userspace sums across all CPUs when reading. Simpler than ring buffer and well-suited for aggregated statistics. |
+| DNS capture | Retains AF_PACKET | kprobes cannot access packet content |
+| Default mode | auto | Auto-detects capability; transparent upgrade path |
+| Feature flag | `ebpf` (not default) | Conservative strategy; users explicitly opt in |
+| Map size limit | 16384 entries | Approximately 2K processes x 8 direction/protocol combinations |
+| Minimum kernel | 5.8 | CAP_BPF + ring buffer + mature BTF support |

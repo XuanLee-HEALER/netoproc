@@ -58,11 +58,12 @@ KERNEL_MINOR=$(uname -r | cut -d. -f2)
 
 if [ "$KERNEL_MAJOR" -gt 5 ] || { [ "$KERNEL_MAJOR" -eq 5 ] && [ "$KERNEL_MINOR" -ge 8 ]; }; then
     # Kernel 5.8+: eBPF mode available
-    # cap_bpf       — load eBPF programs
-    # cap_perfmon   — attach kprobes for per-process traffic monitoring
-    # cap_net_raw   — AF_PACKET socket for DNS capture
-    # cap_net_admin — promiscuous mode
-    CAPS="cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon+eip"
+    # cap_bpf        — load eBPF programs
+    # cap_perfmon    — attach kprobes for per-process traffic monitoring
+    # cap_net_raw    — AF_PACKET socket for DNS capture
+    # cap_net_admin  — promiscuous mode
+    # cap_sys_ptrace — read /proc/<pid>/fd/ for process attribution (AF_PACKET fallback)
+    CAPS="cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon,cap_sys_ptrace+eip"
     echo "Kernel $(uname -r): eBPF mode supported"
 else
     # Older kernel: AF_PACKET only

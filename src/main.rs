@@ -89,6 +89,18 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 0. Install signal handlers for graceful shutdown.
     install_signal_handlers();
 
+    // 0b. Validate --capture-mode on non-Linux platforms.
+    #[cfg(not(target_os = "linux"))]
+    {
+        use netoproc::cli::CaptureMode;
+        if cli.capture_mode != CaptureMode::Auto {
+            eprintln!(
+                "warning: --capture-mode is only supported on Linux, ignoring '{:?}'",
+                cli.capture_mode
+            );
+        }
+    }
+
     // 1. Check capture device access.
     capture::check_capture_access()?;
 

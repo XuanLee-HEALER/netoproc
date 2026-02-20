@@ -58,8 +58,7 @@ pub const PROTO_UDP: u8 = 17;
 const _: () = assert!(core::mem::size_of::<TrafficKey>() == 8);
 const _: () = assert!(core::mem::size_of::<TrafficValue>() == 16);
 
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for TrafficKey {}
-
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for TrafficValue {}
+// Phase 2: When aya is added as a main crate dependency, implement aya::Pod
+// for these types to enable zero-copy map access from userspace:
+//   unsafe impl aya::Pod for TrafficKey {}
+//   unsafe impl aya::Pod for TrafficValue {}

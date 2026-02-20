@@ -55,14 +55,22 @@ fn kernel_version_sufficient() -> bool {
 /// Extract (major, minor) from a kernel version string.
 ///
 /// Expected format: "Linux version X.Y.Z-..."
+/// Searches for the "version" keyword then parses the following token,
+/// which avoids misparsing on non-standard `/proc/version` strings
+/// like `"Linux (compiled by user.name) version 5.15.0"`.
 fn parse_kernel_version(version_str: &str) -> Option<(u32, u32)> {
-    // Find "Linux version X.Y" pattern
-    let version_part = version_str.split_whitespace().find(|s| s.contains('.'))?;
+    let tokens: Vec<&str> = version_str.split_whitespace().collect();
+
+    // Find the "version" keyword and take the next token.
+    let version_part = tokens
+        .iter()
+        .position(|&t| t.eq_ignore_ascii_case("version"))
+        .and_then(|i| tokens.get(i + 1))?;
 
     let mut parts = version_part.split('.');
     let major: u32 = parts.next()?.parse().ok()?;
     let minor_str = parts.next()?;
-    // Minor might be "8" or "8-arch1" — take only the numeric prefix
+    // Minor might be "8" or "8-arch1" — take only the numeric prefix.
     let minor: u32 = minor_str
         .chars()
         .take_while(|c| c.is_ascii_digit())
@@ -151,6 +159,34 @@ mod tests {
         let (major, minor) = parse_kernel_version(v).unwrap();
         assert!(major > 5 || (major == 5 && minor >= 8));
         assert_eq!((major, minor), (6, 1));
+    }
+
+    #[test]
+    fn parse_kernel_version_non_standard_proc_version() {
+        // B4 regression test: "version" keyword not at expected position
+        let v = "Linux (compiled by user.name) version 5.15.0-generic";
+        assert_eq!(parse_kernel_version(v), Some((5, 15)));
+    }
+
+    #[test]
+    fn parse_kernel_version_empty_string() {
+        assert_eq!(parse_kernel_version(""), None);
+    }
+
+    #[test]
+    fn parse_kernel_version_no_version_keyword() {
+        assert_eq!(parse_kernel_version("Linux 5.15.0-generic"), None);
+    }
+
+    #[test]
+    fn parse_kernel_version_version_at_end() {
+        // "version" present but no token follows
+        assert_eq!(parse_kernel_version("Linux version"), None);
+    }
+
+    #[test]
+    fn parse_kernel_version_non_numeric() {
+        assert_eq!(parse_kernel_version("Linux version abc.def"), None);
     }
 
     #[test]
