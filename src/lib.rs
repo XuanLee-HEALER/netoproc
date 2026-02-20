@@ -1,10 +1,16 @@
+#[cfg(target_os = "macos")]
 pub mod bpf;
+pub mod capture;
 pub mod cli;
+pub mod dns;
 pub mod enrichment;
 pub mod error;
 pub mod model;
 pub mod output;
+pub mod packet;
+#[cfg(target_os = "macos")]
 pub mod privilege;
+pub mod process;
 pub mod state;
 pub mod system;
 pub mod tui;

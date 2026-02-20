@@ -1,7 +1,7 @@
-use crate::bpf::dns::DnsMessage;
-use crate::bpf::packet::PacketSummary;
+use crate::dns::DnsMessage;
 use crate::model::SystemNetworkState;
 use crate::model::correlation::correlate;
+use crate::packet::PacketSummary;
 use crate::system::connection::{RawTcpConnection, RawUdpConnection};
 use crate::system::dns_config::RawDnsResolver;
 use crate::system::interface::RawInterface;

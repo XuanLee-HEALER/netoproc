@@ -14,6 +14,8 @@ pub enum NetopError {
     DnsParse { offset: usize, detail: String },
     #[error("serialization error: {0}")]
     Serialization(#[source] std::io::Error),
+    #[error("capture device error: {0}")]
+    CaptureDevice(String),
     #[error("TUI error: {0}")]
     Tui(#[source] std::io::Error),
     #[error("fatal: {0}")]

@@ -4,7 +4,7 @@ use clap::{Parser, ValueEnum};
 #[command(
     name = "netoproc",
     version,
-    about = "Per-process network traffic monitor for macOS"
+    about = "Per-process network traffic monitor for macOS and Linux"
 )]
 pub struct Cli {
     /// Snapshot mode: collect for N seconds then output and exit.
@@ -28,8 +28,8 @@ pub struct Cli {
     #[arg(long)]
     pub no_dns: bool,
 
-    /// BPF kernel buffer size in bytes
-    #[arg(long, default_value_t = 2_097_152, value_parser = validate_bpf_buffer)]
+    /// Capture buffer size in bytes
+    #[arg(long = "capture-buffer", alias = "bpf-buffer", default_value_t = 2_097_152, value_parser = validate_capture_buffer)]
     pub bpf_buffer: u32,
 
     /// Initial sort column (monitor mode)
@@ -90,14 +90,14 @@ fn validate_duration(s: &str) -> Result<f64, String> {
     }
 }
 
-fn validate_bpf_buffer(s: &str) -> Result<u32, String> {
+fn validate_capture_buffer(s: &str) -> Result<u32, String> {
     let val: u32 = s
         .parse()
         .map_err(|_| format!("'{s}' is not a valid integer"))?;
     if val < 4096 {
-        Err("bpf-buffer must be at least 4096 bytes".to_string())
+        Err("capture-buffer must be at least 4096 bytes".to_string())
     } else if val > 16_777_216 {
-        Err("bpf-buffer must be at most 16777216 bytes (16MB)".to_string())
+        Err("capture-buffer must be at most 16777216 bytes (16MB)".to_string())
     } else {
         Ok(val)
     }
@@ -177,24 +177,24 @@ mod tests {
         assert!(cli.no_dns);
     }
 
-    // UT-9.9: BPF buffer valid
+    // UT-9.9: Capture buffer valid
     #[test]
     fn test_bpf_buffer_valid() {
-        let cli = parsed(&["netoproc", "--bpf-buffer", "65536"]);
+        let cli = parsed(&["netoproc", "--capture-buffer", "65536"]);
         assert_eq!(cli.bpf_buffer, 65536);
     }
 
-    // UT-9.10: BPF buffer too small
+    // UT-9.10: Capture buffer too small
     #[test]
     fn test_bpf_buffer_too_small() {
-        let result = parse(&["netoproc", "--bpf-buffer", "1024"]);
+        let result = parse(&["netoproc", "--capture-buffer", "1024"]);
         assert!(result.is_err());
     }
 
-    // UT-9.11: BPF buffer too large (>16MB)
+    // UT-9.11: Capture buffer too large (>16MB)
     #[test]
     fn test_bpf_buffer_too_large() {
-        let result = parse(&["netoproc", "--bpf-buffer", "17000000"]);
+        let result = parse(&["netoproc", "--capture-buffer", "17000000"]);
         assert!(result.is_err());
     }
 
@@ -262,7 +262,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // UT-9.21: BPF buffer default is 2MB
+    // UT-9.21: Capture buffer default is 2MB
     #[test]
     fn test_bpf_buffer_default() {
         let cli = parsed(&["netoproc"]);
@@ -281,7 +281,7 @@ mod tests {
             "--interface",
             "en0",
             "--no-dns",
-            "--bpf-buffer",
+            "--capture-buffer",
             "65536",
             "--no-color",
             "--filter",

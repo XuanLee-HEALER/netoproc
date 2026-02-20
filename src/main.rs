@@ -11,10 +11,9 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use crossbeam_channel::{Receiver, Sender, bounded, select};
 
-use netoproc::bpf::BpfCapture;
-use netoproc::bpf::dns::DnsMessage;
-use netoproc::bpf::packet::PacketSummary;
+use netoproc::capture::{self, PlatformCapture};
 use netoproc::cli::Cli;
+use netoproc::dns::DnsMessage;
 use netoproc::enrichment;
 use netoproc::enrichment::dns_resolver::ReverseDnsResolver;
 use netoproc::error::NetopError;
@@ -23,10 +22,10 @@ use netoproc::model::traffic::{
     ConnectionStats, ProcessKey, ProcessTable, StatsState, lookup_process,
 };
 use netoproc::output;
-use netoproc::privilege;
+use netoproc::packet::PacketSummary;
+use netoproc::process::build_process_table;
 use netoproc::state::{self, merge};
 use netoproc::system;
-use netoproc::system::process::build_process_table;
 
 /// Global shutdown flag, set by signal handlers.
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -52,7 +51,7 @@ fn install_signal_handlers() {
 fn exit_code(err: &NetopError) -> i32 {
     match err {
         NetopError::InsufficientPermission(_) => 1,
-        NetopError::BpfDevice(_) => 2,
+        NetopError::BpfDevice(_) | NetopError::CaptureDevice(_) => 2,
         NetopError::Tui(_) => 4,
         NetopError::Fatal(_) => 4,
         _ => 4,
@@ -90,8 +89,8 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 0. Install signal handlers for graceful shutdown.
     install_signal_handlers();
 
-    // 1. Check BPF device access (root or access_bpf group member).
-    privilege::check_bpf_access()?;
+    // 1. Check capture device access.
+    capture::check_capture_access()?;
 
     // 2. Determine interfaces to monitor.
     let interfaces = discover_interfaces(&cli)?;
@@ -104,14 +103,14 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     let local_ips = collect_local_ips()?;
     log::info!("Local IPs: {} addresses", local_ips.len());
 
-    // 4. Open BPF devices.
+    // 4. Open capture devices.
     let dns_enabled = !cli.no_dns;
     let (traffic_captures, dns_capture) =
-        privilege::open_bpf_devices(&interfaces, cli.bpf_buffer, dns_enabled)?;
+        capture::open_capture_devices(&interfaces, cli.bpf_buffer, dns_enabled)?;
 
     if traffic_captures.is_empty() {
-        return Err(NetopError::BpfDevice(
-            "failed to open any BPF devices".to_string(),
+        return Err(NetopError::CaptureDevice(
+            "failed to open any capture devices".to_string(),
         ));
     }
     log::info!(
@@ -125,26 +124,26 @@ fn run(cli: Cli) -> Result<(), NetopError> {
         Arc::new(ArcSwap::from_pointee(build_process_table()));
 
     // 6. Set up packet channel.
-    // Capacity 8: each batch fills during a 500ms BPF read timeout,
+    // Capacity 8: each batch fills during a 500ms read timeout,
     // so 8 batches = 4s of headroom before backpressure starts.
     let (pkt_tx, pkt_rx) = mpsc::sync_channel::<Vec<PacketSummary>>(8);
 
     // DNS channel (crossbeam, used by monitor mode bridge).
     let (dns_tx, dns_rx): (Sender<DnsMessage>, Receiver<DnsMessage>) = bounded(1024);
 
-    // 7. Spawn BPF capture threads.
-    let mut bpf_handles = Vec::new();
+    // 7. Spawn capture threads.
+    let mut capture_handles = Vec::new();
 
     for mut cap in traffic_captures {
         let tx = pkt_tx.clone();
         let ips = local_ips.clone();
         let h = thread::Builder::new()
-            .name("netoproc-bpf".into())
+            .name("netoproc-capture".into())
             .spawn(move || {
-                bpf_capture_loop(&mut cap, &tx, &ips);
+                capture_loop(&mut cap, &tx, &ips);
             })
-            .map_err(|e| NetopError::Fatal(format!("spawn bpf thread: {e}")))?;
-        bpf_handles.push(h);
+            .map_err(|e| NetopError::Fatal(format!("spawn capture thread: {e}")))?;
+        capture_handles.push(h);
     }
     drop(pkt_tx); // only capture threads hold senders
 
@@ -174,12 +173,12 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 9. Run snapshot or monitor mode.
     let result;
     if cli.is_snapshot() {
-        result = run_snapshot(&cli, pkt_rx, &process_table, bpf_handles);
+        result = run_snapshot(&cli, pkt_rx, &process_table, capture_handles);
     } else {
         result = run_monitor(&cli, pkt_rx, &dns_rx, &process_table);
-        // After TUI exits, join BPF threads.
+        // After TUI exits, join capture threads.
         SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
-        for h in bpf_handles {
+        for h in capture_handles {
             let _ = h.join();
         }
     }
@@ -244,7 +243,7 @@ fn run_snapshot(
     cli: &Cli,
     pkt_rx: mpsc::Receiver<Vec<PacketSummary>>,
     process_table: &Arc<ArcSwap<ProcessTable>>,
-    bpf_handles: Vec<thread::JoinHandle<()>>,
+    capture_handles: Vec<thread::JoinHandle<()>>,
 ) -> Result<(), NetopError> {
     let duration = Duration::from_secs_f64(cli.snapshot_duration());
     let start = Instant::now();
@@ -297,8 +296,8 @@ fn run_snapshot(
         start.elapsed().as_secs_f64()
     );
 
-    // Drain remaining packets: signal BPF threads, join, drain channel.
-    drain_final(&pkt_rx, process_table, &mut state, bpf_handles);
+    // Drain remaining packets: signal capture threads, join, drain channel.
+    drain_final(&pkt_rx, process_table, &mut state, capture_handles);
 
     // Wait for in-flight DNS queries (2-second grace period).
     if let Some(ref mut resolver) = resolver {
@@ -325,17 +324,17 @@ fn run_snapshot(
     output::write_snapshot(&state, cli.format, &mut io::stdout().lock())
 }
 
-/// Signal BPF threads to stop, join them, then drain any remaining packets.
+/// Signal capture threads to stop, join them, then drain any remaining packets.
 fn drain_final(
     pkt_rx: &mpsc::Receiver<Vec<PacketSummary>>,
     process_table: &Arc<ArcSwap<ProcessTable>>,
     state: &mut StatsState,
-    bpf_handles: Vec<thread::JoinHandle<()>>,
+    capture_handles: Vec<thread::JoinHandle<()>>,
 ) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
 
-    // Join BPF threads so all senders are dropped.
-    for h in bpf_handles {
+    // Join capture threads so all senders are dropped.
+    for h in capture_handles {
         let _ = h.join();
     }
 
@@ -428,6 +427,7 @@ fn run_monitor(
         cli.sort,
         cli.no_color,
         cli.filter.as_deref(),
+        &SHUTDOWN_REQUESTED,
     );
 
     // TUI exited — signal shutdown so bridge thread stops.
@@ -584,15 +584,15 @@ fn monitor_stats_loop(
 }
 
 // ---------------------------------------------------------------------------
-// BPF capture thread
+// Capture thread
 // ---------------------------------------------------------------------------
 
-/// BPF capture thread: blocking read loop, sends packet batches to channel.
+/// Capture thread: blocking read loop, sends packet batches to channel.
 ///
-/// Each BPF read blocks for up to 500ms (configured via BIOCSRTIMEOUT).
+/// Each read blocks for up to 500ms (configured via read timeout).
 /// Packets in each batch have their `direction` field set based on local IPs.
-fn bpf_capture_loop(
-    cap: &mut BpfCapture,
+fn capture_loop(
+    cap: &mut PlatformCapture,
     tx: &mpsc::SyncSender<Vec<PacketSummary>>,
     local_ips: &HashSet<IpAddr>,
 ) {
@@ -619,7 +619,7 @@ fn bpf_capture_loop(
                 if pkt_buf.is_empty() {
                     // read() returned data but parser produced no packets.
                     parse_empty_count += 1;
-                    log::debug!("BPF {}: read {} bytes, parsed 0 packets", iface, n);
+                    log::debug!("capture {}: read {} bytes, parsed 0 packets", iface, n);
                 } else {
                     total_packets += pkt_buf.len() as u64;
                     // Set direction based on local IPs.
@@ -632,7 +632,7 @@ fn bpf_capture_loop(
                     }
                     // Send batch using non-blocking try_send with shutdown check.
                     // A blocking send() here would deadlock: after the accumulation
-                    // loop exits, drain_final() joins BPF threads while no one
+                    // loop exits, drain_final() joins capture threads while no one
                     // consumes from the channel. If the channel is full, send()
                     // blocks forever and the join never completes.
                     let mut batch = std::mem::take(&mut pkt_buf);
@@ -648,7 +648,7 @@ fn bpf_capture_loop(
                             }
                             Err(mpsc::TrySendError::Disconnected(_)) => {
                                 log::info!(
-                                    "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
+                                    "capture {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
                                     iface,
                                     eagain_count,
                                     empty_ok_count,
@@ -668,15 +668,15 @@ fn bpf_capture_loop(
                     eagain_count += 1;
                     continue;
                 }
-                log::warn!("BPF read error on {}: {}", iface, e);
+                log::warn!("capture read error on {}: {}", iface, e);
             }
         }
     }
 
-    // Log BPF kernel stats for this device before exiting.
-    match cap.stats() {
-        Ok(st) => log::info!(
-            "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}, kernel_recv={}, kernel_drop={}",
+    // Log capture stats for this device before exiting.
+    if let Some(st) = capture::capture_stats(cap) {
+        log::info!(
+            "capture {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}, kernel_recv={}, kernel_drop={}",
             iface,
             eagain_count,
             empty_ok_count,
@@ -685,16 +685,17 @@ fn bpf_capture_loop(
             total_packets,
             st.received,
             st.dropped
-        ),
-        Err(_) => log::info!(
-            "BPF {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
+        );
+    } else {
+        log::info!(
+            "capture {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}",
             iface,
             eagain_count,
             empty_ok_count,
             data_read_count,
             parse_empty_count,
             total_packets
-        ),
+        );
     }
 }
 
@@ -708,7 +709,7 @@ fn bpf_capture_loop(
 /// mode, nobody reads from `dns_rx`, so the bounded channel fills up. A
 /// blocking `send` would block forever, preventing the thread from exiting
 /// when `SHUTDOWN_REQUESTED` is set.
-fn dns_capture_loop(cap: &mut BpfCapture, tx: &Sender<DnsMessage>) {
+fn dns_capture_loop(cap: &mut PlatformCapture, tx: &Sender<DnsMessage>) {
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             return;
@@ -732,9 +733,9 @@ fn dns_capture_loop(cap: &mut BpfCapture, tx: &Sender<DnsMessage>) {
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("Resource temporarily unavailable") {
-                    continue; // EAGAIN — BPF read timeout, normal
+                    continue; // EAGAIN — read timeout, normal
                 }
-                log::warn!("DNS BPF read error: {e}");
+                log::warn!("DNS capture read error: {e}");
             }
         }
     }

@@ -6,9 +6,9 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use crate::error::NetopError;
+use crate::packet::PacketSummary;
 
 use self::filter::bpf_insn;
-use self::packet::PacketSummary;
 
 // ---------------------------------------------------------------------------
 // BPF ioctl constants (macOS-specific)
@@ -48,34 +48,18 @@ const _: () = assert!(BIOCGDLT == 0x4004_426A);
 // Data link type (DLT) support
 // ---------------------------------------------------------------------------
 
+use crate::packet::LinkType;
+
 const DLT_NULL: u32 = 0; // BSD loopback (4-byte AF header)
 const DLT_EN10MB: u32 = 1; // Ethernet
 const DLT_RAW: u32 = 12; // Raw IP (no link-layer header)
 
-/// Data link type of a BPF capture device.
-///
-/// Determines the link-layer framing used by the interface, which affects
-/// both the BPF filter program and the packet parser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkType {
-    /// Ethernet (DLT_EN10MB = 1): 14-byte header, EtherType at offset 12.
-    Ethernet,
-    /// Raw IP (DLT_RAW = 12): no link-layer header, IP starts at offset 0.
-    /// Used by macOS `utun*` (tunnel) interfaces.
-    Raw,
-    /// Null/Loopback (DLT_NULL = 0): 4-byte AF header in host byte order.
-    /// Used by macOS `lo0`.
-    Null,
-}
-
-impl LinkType {
-    fn from_dlt(dlt: u32) -> Option<Self> {
-        match dlt {
-            DLT_EN10MB => Some(Self::Ethernet),
-            DLT_RAW => Some(Self::Raw),
-            DLT_NULL => Some(Self::Null),
-            _ => None,
-        }
+fn link_type_from_dlt(dlt: u32) -> Option<LinkType> {
+    match dlt {
+        DLT_EN10MB => Some(LinkType::Ethernet),
+        DLT_RAW => Some(LinkType::Raw),
+        DLT_NULL => Some(LinkType::Null),
+        _ => None,
     }
 }
 
@@ -150,7 +134,7 @@ impl BpfCapture {
         // 3. Detect data link type (must be after BIOCSETIF)
         let mut dlt: u32 = 0;
         ioctl_get(&fd, BIOCGDLT, &mut dlt)?;
-        let link_type = LinkType::from_dlt(dlt).ok_or_else(|| {
+        let link_type = link_type_from_dlt(dlt).ok_or_else(|| {
             NetopError::BpfDevice(format!(
                 "unsupported data link type {dlt} on interface {interface}"
             ))

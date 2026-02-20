@@ -3,8 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 
 use rustc_hash::FxHashMap;
 
-use crate::bpf::packet::PacketSummary;
 use crate::model::{Direction, Protocol};
+use crate::packet::PacketSummary;
 
 /// Normalized 5-tuple key for socket-to-process mapping.
 ///

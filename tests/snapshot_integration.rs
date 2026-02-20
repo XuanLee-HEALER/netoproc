@@ -21,7 +21,16 @@ fn netoproc_bin() -> String {
 }
 
 /// Build the binary before running tests.
+///
+/// When running via `cross test`, the binary is already compiled and placed
+/// in the target directory — calling `cargo build` again fails due to
+/// permission issues in the Docker container. Skip the build if the binary
+/// already exists.
 fn ensure_binary() {
+    let bin = netoproc_bin();
+    if std::path::Path::new(&bin).exists() {
+        return;
+    }
     let status = Command::new("cargo")
         .args(["build"])
         .status()
@@ -143,8 +152,15 @@ fn tc_1_5_snapshot_specific_interface() {
     require_root!();
     ensure_binary();
 
+    // Use a platform-appropriate interface name.
+    let iface = if cfg!(target_os = "linux") {
+        "lo"
+    } else {
+        "en0"
+    };
+
     let output = Command::new(netoproc_bin())
-        .args(["--duration", "1", "--interface", "en0"])
+        .args(["--duration", "1", "--interface", iface])
         .output()
         .expect("failed to execute");
 
@@ -152,7 +168,7 @@ fn tc_1_5_snapshot_specific_interface() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("pid\tprocess"));
     } else {
-        // en0 doesn't exist — must be BPF error (exit 2)
+        // Interface doesn't exist — must be capture error (exit 2)
         assert_eq!(output.status.code(), Some(2));
     }
 }

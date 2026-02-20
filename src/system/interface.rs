@@ -25,8 +25,8 @@ impl RawInterface {
     }
 }
 
-// if_data structure for AF_LINK entries on macOS
-// This contains interface-level traffic statistics
+// macOS: if_data structure for AF_LINK entries
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct if_data {
@@ -61,10 +61,6 @@ struct if_data {
     ifi_reserved2: u32,
 }
 
-// On macOS 64-bit, if_data64 is used when available
-// For simplicity we use the 32-bit counters and note potential wrap
-// A more robust implementation would use if_data64
-
 /// Enumerate all network interfaces and their statistics
 pub fn list_interfaces() -> Result<Vec<RawInterface>, NetopError> {
     let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -73,7 +69,6 @@ pub fn list_interfaces() -> Result<Vec<RawInterface>, NetopError> {
         return Err(NetopError::Interface(std::io::Error::last_os_error()));
     }
 
-    // Ensure freeifaddrs is called on all exit paths
     let result = collect_interfaces(ifaddrs);
 
     unsafe { libc::freeifaddrs(ifaddrs) };
@@ -104,8 +99,9 @@ fn collect_interfaces(ifaddrs: *mut libc::ifaddrs) -> Result<Vec<RawInterface>, 
             let sa_family = unsafe { (*entry.ifa_addr).sa_family } as i32;
 
             match sa_family {
+                #[cfg(target_os = "macos")]
                 libc::AF_LINK => {
-                    // Extract if_data counters
+                    // Extract if_data counters (macOS)
                     if !entry.ifa_data.is_null() {
                         let data = unsafe { &*(entry.ifa_data as *const if_data) };
                         iface.ifi_ibytes = data.ifi_ibytes as u64;
@@ -116,8 +112,12 @@ fn collect_interfaces(ifaddrs: *mut libc::ifaddrs) -> Result<Vec<RawInterface>, 
                         iface.ifi_oerrors = data.ifi_oerrors as u64;
                     }
                 }
+                #[cfg(target_os = "linux")]
+                libc::AF_PACKET => {
+                    // On Linux, read counters from /sys/class/net/<name>/statistics/
+                    read_sysfs_counters(&name, iface);
+                }
                 libc::AF_INET => {
-                    // Extract IPv4 address
                     let sa_in = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
                     let addr_bytes = sa_in.sin_addr.s_addr.to_ne_bytes();
                     let addr =
@@ -125,7 +125,6 @@ fn collect_interfaces(ifaddrs: *mut libc::ifaddrs) -> Result<Vec<RawInterface>, 
                     iface.ipv4_addresses.push(IpAddr::V4(addr));
                 }
                 libc::AF_INET6 => {
-                    // Extract IPv6 address
                     let sa_in6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
                     let addr = Ipv6Addr::from(sa_in6.sin6_addr.s6_addr);
                     iface.ipv6_addresses.push(IpAddr::V6(addr));
@@ -138,4 +137,24 @@ fn collect_interfaces(ifaddrs: *mut libc::ifaddrs) -> Result<Vec<RawInterface>, 
     }
 
     Ok(interfaces.into_values().collect())
+}
+
+/// Read interface counters from /sys/class/net/<name>/statistics/ (Linux only)
+#[cfg(target_os = "linux")]
+fn read_sysfs_counters(name: &str, iface: &mut RawInterface) {
+    let base = format!("/sys/class/net/{name}/statistics");
+    iface.ifi_ibytes = read_sysfs_u64(&format!("{base}/rx_bytes"));
+    iface.ifi_obytes = read_sysfs_u64(&format!("{base}/tx_bytes"));
+    iface.ifi_ipackets = read_sysfs_u64(&format!("{base}/rx_packets"));
+    iface.ifi_opackets = read_sysfs_u64(&format!("{base}/tx_packets"));
+    iface.ifi_ierrors = read_sysfs_u64(&format!("{base}/rx_errors"));
+    iface.ifi_oerrors = read_sysfs_u64(&format!("{base}/tx_errors"));
+}
+
+#[cfg(target_os = "linux")]
+fn read_sysfs_u64(path: &str) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }

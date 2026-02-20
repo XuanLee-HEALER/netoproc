@@ -5,6 +5,7 @@ pub mod widgets;
 
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -85,6 +86,7 @@ pub fn run_tui(
     sort_column: SortColumn,
     no_color: bool,
     initial_filter: Option<&str>,
+    shutdown: &AtomicBool,
 ) -> Result<(), NetopError> {
     // Check terminal size before entering alternate screen.
     let (cols, rows) = crossterm::terminal::size().map_err(|e| {
@@ -109,7 +111,7 @@ pub fn run_tui(
     let mut app = App::new(sort_column, no_color, initial_filter);
     let events = EventHandler::new(interval);
 
-    let result = run_event_loop(&mut terminal, &mut app, &events, &shared_state);
+    let result = run_event_loop(&mut terminal, &mut app, &events, &shared_state, shutdown);
 
     // Restore terminal regardless of success/failure.
     let _ = disable_raw_mode();
@@ -123,6 +125,7 @@ fn run_event_loop(
     app: &mut App,
     events: &EventHandler,
     shared_state: &Arc<ArcSwap<SystemNetworkState>>,
+    shutdown: &AtomicBool,
 ) -> Result<(), NetopError> {
     loop {
         // Render current state.
@@ -149,7 +152,9 @@ fn run_event_loop(
                 // ratatui handles resize automatically on next draw.
             }
             Ok(Event::Tick) => {
-                // Tick — just redraw with latest state.
+                if shutdown.load(Ordering::Relaxed) {
+                    app.should_quit = true;
+                }
             }
             Err(_) => {
                 // Channel disconnected — exit.

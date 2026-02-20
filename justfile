@@ -77,5 +77,13 @@ setup-bpf:
 remove-bpf:
     sudo bash scripts/uninstall-bpf.sh
 
+# Cross-compile check for Linux x86_64 (requires cross)
+cross-check:
+    cross build --target x86_64-unknown-linux-gnu
+
+# Cross-compile check for Linux aarch64 (requires cross)
+cross-check-arm:
+    cross build --target aarch64-unknown-linux-gnu
+
 # Run tests and lint in sequence (pre-commit check)
 ci: lint test

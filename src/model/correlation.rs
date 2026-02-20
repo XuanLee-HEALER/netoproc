@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use crate::bpf::dns::DnsMessage;
-use crate::bpf::packet::PacketSummary;
+use crate::dns::DnsMessage;
 use crate::model::{
     Connection, Direction, DnsObservatory, DnsQuery, DnsResolver, Interface, InterfaceStatus,
     Process, Protocol, RateMetrics, Socket, SocketState, SystemNetworkState,
 };
+use crate::packet::PacketSummary;
 use crate::system::connection::{RawTcpConnection, RawUdpConnection};
 use crate::system::dns_config::RawDnsResolver;
 use crate::system::interface::RawInterface;
@@ -509,6 +509,18 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    // TCP state constants differ between platforms.
+    // macOS uses BSD TCPS_* values; Linux uses /proc/net/tcp hex values.
+    #[cfg(target_os = "macos")]
+    const TCP_STATE_LISTEN: i32 = 1;
+    #[cfg(target_os = "macos")]
+    const TCP_STATE_ESTABLISHED: i32 = 4;
+
+    #[cfg(target_os = "linux")]
+    const TCP_STATE_LISTEN: i32 = 0x0A;
+    #[cfg(target_os = "linux")]
+    const TCP_STATE_ESTABLISHED: i32 = 0x01;
+
     fn make_raw_process(pid: u32, name: &str, sockets: Vec<RawSocket>) -> RawProcess {
         RawProcess {
             pid,
@@ -577,7 +589,7 @@ mod tests {
     // UT-6.2: Single process with one TCP socket
     #[test]
     fn ut_6_2_single_process() {
-        let sock = make_raw_socket(3, 12345, 80, Some(4)); // ESTABLISHED
+        let sock = make_raw_socket(3, 12345, 80, Some(TCP_STATE_ESTABLISHED)); // ESTABLISHED
         let proc = make_raw_process(100, "curl", vec![sock]);
         let state = correlate(
             &[proc],
@@ -598,7 +610,7 @@ mod tests {
     // UT-6.3: Packet matched to connection (RX direction)
     #[test]
     fn ut_6_3_packet_rx_match() {
-        let sock = make_raw_socket(3, 12345, 80, Some(4));
+        let sock = make_raw_socket(3, 12345, 80, Some(TCP_STATE_ESTABLISHED));
         let proc = make_raw_process(100, "curl", vec![sock]);
 
         // Packet: remote → local (RX)
@@ -629,7 +641,7 @@ mod tests {
     // UT-6.4: Packet matched to connection (TX direction)
     #[test]
     fn ut_6_4_packet_tx_match() {
-        let sock = make_raw_socket(3, 12345, 80, Some(4));
+        let sock = make_raw_socket(3, 12345, 80, Some(TCP_STATE_ESTABLISHED));
         let proc = make_raw_process(100, "curl", vec![sock]);
 
         // Packet: local → remote (TX)
@@ -670,7 +682,7 @@ mod tests {
             local_port: 8080,
             remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
             remote_port: 0,
-            tcp_state: Some(1), // LISTEN
+            tcp_state: Some(TCP_STATE_LISTEN),
         };
         let conn_sock = RawSocket {
             fd: 4,
@@ -681,7 +693,7 @@ mod tests {
             local_port: 8080,
             remote_addr: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
             remote_port: 54321,
-            tcp_state: Some(4), // ESTABLISHED
+            tcp_state: Some(TCP_STATE_ESTABLISHED),
         };
         let proc = make_raw_process(200, "nginx", vec![listen_sock, conn_sock]);
 
@@ -711,7 +723,7 @@ mod tests {
     // UT-6.6: Direction detection — no LISTEN → outbound
     #[test]
     fn ut_6_6_direction_outbound() {
-        let sock = make_raw_socket(3, 54321, 443, Some(4));
+        let sock = make_raw_socket(3, 54321, 443, Some(TCP_STATE_ESTABLISHED));
         let proc = make_raw_process(100, "chrome", vec![sock]);
 
         let state = correlate(
@@ -766,7 +778,7 @@ mod tests {
     // UT-6.8: Multiple packets accumulate correctly
     #[test]
     fn ut_6_8_packet_accumulation() {
-        let sock = make_raw_socket(3, 12345, 80, Some(4));
+        let sock = make_raw_socket(3, 12345, 80, Some(TCP_STATE_ESTABLISHED));
         let proc = make_raw_process(100, "curl", vec![sock]);
 
         let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
@@ -822,7 +834,7 @@ mod tests {
     // UT-6.10: Cumulative totals preserved across state transitions
     #[test]
     fn ut_6_10_totals_preserved() {
-        let sock = make_raw_socket(3, 12345, 80, Some(4));
+        let sock = make_raw_socket(3, 12345, 80, Some(TCP_STATE_ESTABLISHED));
 
         let local = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
         let remote = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
