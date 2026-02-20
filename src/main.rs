@@ -219,6 +219,10 @@ fn run(cli: Cli) -> Result<(), NetopError> {
         let _ = h.join();
     }
 
+    // 11. Platform cleanup.
+    #[cfg(target_os = "windows")]
+    capture::wsa_cleanup();
+
     result
 }
 

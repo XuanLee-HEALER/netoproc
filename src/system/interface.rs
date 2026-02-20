@@ -185,7 +185,7 @@ pub fn list_interfaces() -> Result<Vec<RawInterface>, NetopError> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
     };
-    use windows_sys::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
 
     // First call: get required buffer size
     let mut size: u32 = 0;
@@ -248,16 +248,14 @@ pub fn list_interfaces() -> Result<Vec<RawInterface>, NetopError> {
             let ua = unsafe { &*unicast };
             let sa = unsafe { &*ua.Address.lpSockaddr };
 
-            match sa.sa_family as i32 {
-                2 => {
-                    // AF_INET
+            match sa.sa_family {
+                AF_INET => {
                     let sa_in = unsafe { &*(ua.Address.lpSockaddr as *const SOCKADDR_IN) };
                     let addr_bytes = unsafe { sa_in.sin_addr.S_un.S_addr }.to_ne_bytes();
                     let addr = Ipv4Addr::new(addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3]);
                     iface.ipv4_addresses.push(IpAddr::V4(addr));
                 }
-                23 => {
-                    // AF_INET6 on Windows
+                AF_INET6 => {
                     let sa_in6 = unsafe { &*(ua.Address.lpSockaddr as *const SOCKADDR_IN6) };
                     let addr_bytes = unsafe { sa_in6.sin6_addr.u.Byte };
                     let addr = Ipv6Addr::from(addr_bytes);

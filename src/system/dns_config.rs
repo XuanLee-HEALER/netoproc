@@ -290,7 +290,7 @@ pub fn list_dns_resolvers() -> Result<Vec<RawDnsResolver>, NetopError> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, IP_ADAPTER_ADDRESSES_LH,
     };
-    use windows_sys::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
 
     let mut size: u32 = 0;
     let flags = GAA_FLAG_INCLUDE_PREFIX;
@@ -335,15 +335,13 @@ pub fn list_dns_resolvers() -> Result<Vec<RawDnsResolver>, NetopError> {
             let ds = unsafe { &*dns_server };
             let sa = unsafe { &*ds.Address.lpSockaddr };
 
-            let addr_str = match sa.sa_family as i32 {
-                2 => {
-                    // AF_INET
+            let addr_str = match sa.sa_family {
+                AF_INET => {
                     let sa_in = unsafe { &*(ds.Address.lpSockaddr as *const SOCKADDR_IN) };
                     let bytes = unsafe { sa_in.sin_addr.S_un.S_addr }.to_ne_bytes();
                     Some(format!("{}", Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3])))
                 }
-                23 => {
-                    // AF_INET6
+                AF_INET6 => {
                     let sa_in6 = unsafe { &*(ds.Address.lpSockaddr as *const SOCKADDR_IN6) };
                     let addr_bytes = unsafe { sa_in6.sin6_addr.u.Byte };
                     let addr = Ipv6Addr::from(addr_bytes);

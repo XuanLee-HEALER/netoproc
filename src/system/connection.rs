@@ -382,106 +382,33 @@ fn parse_proc_net_udp(content: &str, is_v6: bool, out: &mut Vec<RawUdpConnection
 #[cfg(target_os = "windows")]
 pub fn list_tcp_connections() -> Result<Vec<RawTcpConnection>, NetopError> {
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCP6TABLE_OWNER_PID,
-        MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
-    };
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    use crate::process::windows as win_helpers;
 
     let mut conns = Vec::new();
 
     // IPv4 TCP
-    let mut size: u32 = 0;
-    unsafe {
-        GetExtendedTcpTable(
-            std::ptr::null_mut(),
-            &mut size,
-            0,
-            AF_INET as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-    }
-    if size > 0 {
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        };
-        if ret == 0 {
-            let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-            let count = table.dwNumEntries as usize;
-            let header_size = std::mem::size_of::<u32>();
-            let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-            if header_size + count * row_size <= buffer.len() {
-                let rows_ptr = buffer.as_ptr().wrapping_add(header_size)
-                    as *const MIB_TCPROW_OWNER_PID;
-                for i in 0..count {
-                    let row = unsafe { &*rows_ptr.add(i) };
-                    conns.push(RawTcpConnection {
-                        local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
-                        local_port: u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes()),
-                        remote_addr: IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes())),
-                        remote_port: u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes()),
-                        tcp_state: row.dwState as i32,
-                        if_index: 0,
-                    });
-                }
-            }
-        }
+    for row in win_helpers::get_tcp4_rows() {
+        conns.push(RawTcpConnection {
+            local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes())),
+            remote_port: u16::from_be(row.dwRemotePort as u16),
+            tcp_state: row.dwState as i32,
+            if_index: 0,
+        });
     }
 
     // IPv6 TCP
-    size = 0;
-    unsafe {
-        GetExtendedTcpTable(
-            std::ptr::null_mut(),
-            &mut size,
-            0,
-            AF_INET6 as u32,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        );
-    }
-    if size > 0 {
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        };
-        if ret == 0 {
-            let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
-            let count = table.dwNumEntries as usize;
-            let header_size = std::mem::size_of::<u32>();
-            let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
-            if header_size + count * row_size <= buffer.len() {
-                let rows_ptr = buffer.as_ptr().wrapping_add(header_size)
-                    as *const MIB_TCP6ROW_OWNER_PID;
-                for i in 0..count {
-                    let row = unsafe { &*rows_ptr.add(i) };
-                    conns.push(RawTcpConnection {
-                        local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
-                        local_port: u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes()),
-                        remote_addr: IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr)),
-                        remote_port: u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes()),
-                        tcp_state: row.dwState as i32,
-                        if_index: 0,
-                    });
-                }
-            }
-        }
+    for row in win_helpers::get_tcp6_rows() {
+        conns.push(RawTcpConnection {
+            local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr)),
+            remote_port: u16::from_be(row.dwRemotePort as u16),
+            tcp_state: row.dwState as i32,
+            if_index: 0,
+        });
     }
 
     Ok(conns)
@@ -490,104 +417,31 @@ pub fn list_tcp_connections() -> Result<Vec<RawTcpConnection>, NetopError> {
 #[cfg(target_os = "windows")]
 pub fn list_udp_connections() -> Result<Vec<RawUdpConnection>, NetopError> {
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedUdpTable, MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID,
-        MIB_UDPROW_OWNER_PID, MIB_UDPTABLE_OWNER_PID, UDP_TABLE_OWNER_PID,
-    };
-    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
+    use crate::process::windows as win_helpers;
 
     let mut conns = Vec::new();
 
     // IPv4 UDP
-    let mut size: u32 = 0;
-    unsafe {
-        GetExtendedUdpTable(
-            std::ptr::null_mut(),
-            &mut size,
-            0,
-            AF_INET as u32,
-            UDP_TABLE_OWNER_PID,
-            0,
-        );
-    }
-    if size > 0 {
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedUdpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        };
-        if ret == 0 {
-            let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
-            let count = table.dwNumEntries as usize;
-            let header_size = std::mem::size_of::<u32>();
-            let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
-            if header_size + count * row_size <= buffer.len() {
-                let rows_ptr = buffer.as_ptr().wrapping_add(header_size)
-                    as *const MIB_UDPROW_OWNER_PID;
-                for i in 0..count {
-                    let row = unsafe { &*rows_ptr.add(i) };
-                    conns.push(RawUdpConnection {
-                        local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
-                        local_port: u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes()),
-                        remote_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                        remote_port: 0,
-                        if_index: 0,
-                    });
-                }
-            }
-        }
+    for row in win_helpers::get_udp4_rows() {
+        conns.push(RawUdpConnection {
+            local_addr: IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes())),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            remote_port: 0,
+            if_index: 0,
+        });
     }
 
     // IPv6 UDP
-    size = 0;
-    unsafe {
-        GetExtendedUdpTable(
-            std::ptr::null_mut(),
-            &mut size,
-            0,
-            AF_INET6 as u32,
-            UDP_TABLE_OWNER_PID,
-            0,
-        );
-    }
-    if size > 0 {
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedUdpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        };
-        if ret == 0 {
-            let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
-            let count = table.dwNumEntries as usize;
-            let header_size = std::mem::size_of::<u32>();
-            let row_size = std::mem::size_of::<MIB_UDP6ROW_OWNER_PID>();
-            if header_size + count * row_size <= buffer.len() {
-                let rows_ptr = buffer.as_ptr().wrapping_add(header_size)
-                    as *const MIB_UDP6ROW_OWNER_PID;
-                for i in 0..count {
-                    let row = unsafe { &*rows_ptr.add(i) };
-                    conns.push(RawUdpConnection {
-                        local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
-                        local_port: u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes()),
-                        remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                        remote_port: 0,
-                        if_index: 0,
-                    });
-                }
-            }
-        }
+    for row in win_helpers::get_udp6_rows() {
+        conns.push(RawUdpConnection {
+            local_addr: IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr)),
+            local_port: u16::from_be(row.dwLocalPort as u16),
+            remote_addr: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            remote_port: 0,
+            if_index: 0,
+        });
     }
 
     Ok(conns)

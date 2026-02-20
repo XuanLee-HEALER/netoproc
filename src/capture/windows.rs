@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use windows_sys::Win32::Networking::WinSock::{
-    self as ws, AF_INET, INVALID_SOCKET, IPPROTO_IP, RCVALL_ON, SIO_RCVALL, SOCK_RAW, SOCKET,
-    SOCKET_ERROR, SOL_SOCKET, SO_RCVTIMEO, WSADATA, WSA_FLAG_OVERLAPPED,
+    self as ws, AF_INET, FIONBIO, INVALID_SOCKET, IPPROTO_IP, RCVALL_ON, SIO_RCVALL, SOCK_RAW,
+    SOCKET, SOCKET_ERROR, SOL_SOCKET, SO_RCVTIMEO, WSADATA, WSA_FLAG_OVERLAPPED,
 };
 
 use crate::dns::DnsMessage;
@@ -27,25 +27,29 @@ use super::FilterKind;
 // WSA initialization (one-time global)
 // ---------------------------------------------------------------------------
 
-static WSA_INIT: std::sync::Once = std::sync::Once::new();
+static WSA_INIT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
 
 fn ensure_wsa_init() -> Result<(), NetopError> {
-    let mut init_error: Option<NetopError> = None;
-
-    WSA_INIT.call_once(|| {
+    let result = WSA_INIT.get_or_init(|| {
         let mut wsa_data: WSADATA = unsafe { std::mem::zeroed() };
         let ret = unsafe { ws::WSAStartup(0x0202, &mut wsa_data) };
         if ret != 0 {
-            init_error = Some(NetopError::WinApi(format!(
-                "WSAStartup failed with error: {ret}"
-            )));
+            Err(format!("WSAStartup failed with error: {ret}"))
+        } else {
+            Ok(())
         }
     });
+    result.clone().map_err(NetopError::WinApi)
+}
 
-    if let Some(e) = init_error {
-        return Err(e);
+/// Clean up Winsock resources. Call once during process shutdown.
+///
+/// Only has effect if `ensure_wsa_init()` succeeded. Safe to call
+/// multiple times (only the first call after init has effect).
+pub fn wsa_cleanup() {
+    if let Some(Ok(())) = WSA_INIT.get() {
+        unsafe { ws::WSACleanup() };
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -60,11 +64,13 @@ pub struct RawSocketCapture {
     socket: SOCKET,
     buffer: Vec<u8>,
     interface: String,
-    _filter: FilterKind,
     _local_ips: HashSet<IpAddr>,
 }
 
-// SOCKET is a usize on Windows, safe to send across threads
+// SAFETY: `SOCKET` is `usize` on Windows (a kernel handle), which is
+// inherently `Send`. The remaining fields (`Vec<u8>`, `String`,
+// `HashSet<IpAddr>`) are all `Send`. The socket handle is only used via
+// `recv`/`closesocket` which are thread-safe Windows APIs.
 unsafe impl Send for RawSocketCapture {}
 
 pub type PlatformCapture = RawSocketCapture;
@@ -85,7 +91,7 @@ impl RawSocketCapture {
         interface_name: &str,
         interface_ip: Ipv4Addr,
         buffer_size: u32,
-        filter_kind: FilterKind,
+        _filter_kind: FilterKind,
         local_ips: HashSet<IpAddr>,
     ) -> Result<Self, NetopError> {
         ensure_wsa_init()?;
@@ -183,7 +189,6 @@ impl RawSocketCapture {
             socket,
             buffer,
             interface: interface_name.to_string(),
-            _filter: filter_kind,
             _local_ips: local_ips,
         })
     }
@@ -229,7 +234,11 @@ impl RawSocketCapture {
             }
         }
 
-        // Drain additional pending packets with non-blocking recv
+        // Set non-blocking for drain loop
+        let mut nonblock: u32 = 1;
+        unsafe { ws::ioctlsocket(self.socket, FIONBIO, &mut nonblock) };
+
+        // Drain additional pending packets (non-blocking)
         loop {
             let n = unsafe {
                 ws::recv(
@@ -252,6 +261,10 @@ impl RawSocketCapture {
                 out.push(pkt);
             }
         }
+
+        // Restore blocking mode
+        nonblock = 0;
+        unsafe { ws::ioctlsocket(self.socket, FIONBIO, &mut nonblock) };
 
         Ok(total_bytes)
     }
@@ -290,7 +303,11 @@ impl RawSocketCapture {
             }
         }
 
-        // Drain additional pending packets
+        // Set non-blocking for drain loop
+        let mut nonblock: u32 = 1;
+        unsafe { ws::ioctlsocket(self.socket, FIONBIO, &mut nonblock) };
+
+        // Drain additional pending packets (non-blocking)
         loop {
             let n = unsafe {
                 ws::recv(
@@ -313,6 +330,10 @@ impl RawSocketCapture {
                 }
             }
         }
+
+        // Restore blocking mode
+        nonblock = 0;
+        unsafe { ws::ioctlsocket(self.socket, FIONBIO, &mut nonblock) };
 
         Ok(messages)
     }

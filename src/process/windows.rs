@@ -4,7 +4,11 @@
 // return socket → owning PID mappings. This is simpler than Linux (inode
 // correlation) or macOS (libproc per-process FD scan).
 //
-// Process names are obtained via CreateToolhelp32Snapshot.
+// Process names are obtained via CreateToolhelp32Snapshot (Wide API).
+//
+// The `get_*_rows()` functions are shared by process/windows.rs,
+// system/process.rs, and system/connection.rs to avoid duplicating
+// the ~200-line table fetching pattern across three files.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -18,7 +22,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+    TH32CS_SNAPPROCESS,
 };
 
 use crate::model::traffic::{ProcessInfo, ProcessTable, SocketKey};
@@ -34,141 +39,105 @@ pub fn build_process_table() -> ProcessTable {
     let pid_names = build_pid_name_map();
 
     // TCP IPv4 connections
-    if let Some(tcp4) = get_tcp4_table() {
-        for row in &tcp4 {
-            let local_ip = IpAddr::V4(Ipv4Addr::from(row.local_addr.to_ne_bytes()));
-            let remote_ip = IpAddr::V4(Ipv4Addr::from(row.remote_addr.to_ne_bytes()));
-            let local_port = u16::from_be_bytes((row.local_port as u16).to_ne_bytes());
-            let remote_port = u16::from_be_bytes((row.remote_port as u16).to_ne_bytes());
+    for row in get_tcp4_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+        let remote_ip = IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()));
+        let local_port = u16::from_be(row.dwLocalPort as u16);
+        let remote_port = u16::from_be(row.dwRemotePort as u16);
 
-            let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
-            let name = pid_names
-                .get(&row.pid)
-                .cloned()
-                .unwrap_or_default();
-            table.insert(
-                key,
-                ProcessInfo {
-                    pid: row.pid,
-                    name,
-                },
-            );
-        }
+        let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
+        let name = pid_names
+            .get(&row.dwOwningPid)
+            .cloned()
+            .unwrap_or_default();
+        table.insert(
+            key,
+            ProcessInfo {
+                pid: row.dwOwningPid,
+                name,
+            },
+        );
     }
 
     // TCP IPv6 connections
-    if let Some(tcp6) = get_tcp6_table() {
-        for row in &tcp6 {
-            let local_ip = IpAddr::V6(Ipv6Addr::from(row.local_addr));
-            let remote_ip = IpAddr::V6(Ipv6Addr::from(row.remote_addr));
-            let local_port = u16::from_be_bytes((row.local_port as u16).to_ne_bytes());
-            let remote_port = u16::from_be_bytes((row.remote_port as u16).to_ne_bytes());
+    for row in get_tcp6_rows() {
+        let local_ip = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+        let remote_ip = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
+        let local_port = u16::from_be(row.dwLocalPort as u16);
+        let remote_port = u16::from_be(row.dwRemotePort as u16);
 
-            let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
-            let name = pid_names
-                .get(&row.pid)
-                .cloned()
-                .unwrap_or_default();
-            table.insert(
-                key,
-                ProcessInfo {
-                    pid: row.pid,
-                    name,
-                },
-            );
-        }
+        let key = SocketKey::new(local_ip, local_port, remote_ip, remote_port, 6);
+        let name = pid_names
+            .get(&row.dwOwningPid)
+            .cloned()
+            .unwrap_or_default();
+        table.insert(
+            key,
+            ProcessInfo {
+                pid: row.dwOwningPid,
+                name,
+            },
+        );
     }
 
     // UDP IPv4 endpoints
-    if let Some(udp4) = get_udp4_table() {
-        for row in &udp4 {
-            let local_ip = IpAddr::V4(Ipv4Addr::from(row.local_addr.to_ne_bytes()));
-            let local_port = u16::from_be_bytes((row.local_port as u16).to_ne_bytes());
+    for row in get_udp4_rows() {
+        let local_ip = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+        let local_port = u16::from_be(row.dwLocalPort as u16);
 
-            let key = SocketKey::new(
-                local_ip,
-                local_port,
-                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                0,
-                17,
-            );
-            let name = pid_names
-                .get(&row.pid)
-                .cloned()
-                .unwrap_or_default();
-            table.insert(
-                key,
-                ProcessInfo {
-                    pid: row.pid,
-                    name,
-                },
-            );
-        }
+        let key = SocketKey::new(
+            local_ip,
+            local_port,
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            0,
+            17,
+        );
+        let name = pid_names
+            .get(&row.dwOwningPid)
+            .cloned()
+            .unwrap_or_default();
+        table.insert(
+            key,
+            ProcessInfo {
+                pid: row.dwOwningPid,
+                name,
+            },
+        );
     }
 
     // UDP IPv6 endpoints
-    if let Some(udp6) = get_udp6_table() {
-        for row in &udp6 {
-            let local_ip = IpAddr::V6(Ipv6Addr::from(row.local_addr));
-            let local_port = u16::from_be_bytes((row.local_port as u16).to_ne_bytes());
+    for row in get_udp6_rows() {
+        let local_ip = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+        let local_port = u16::from_be(row.dwLocalPort as u16);
 
-            let key = SocketKey::new(
-                local_ip,
-                local_port,
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                0,
-                17,
-            );
-            let name = pid_names
-                .get(&row.pid)
-                .cloned()
-                .unwrap_or_default();
-            table.insert(
-                key,
-                ProcessInfo {
-                    pid: row.pid,
-                    name,
-                },
-            );
-        }
+        let key = SocketKey::new(
+            local_ip,
+            local_port,
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            0,
+            17,
+        );
+        let name = pid_names
+            .get(&row.dwOwningPid)
+            .cloned()
+            .unwrap_or_default();
+        table.insert(
+            key,
+            ProcessInfo {
+                pid: row.dwOwningPid,
+                name,
+            },
+        );
     }
 
     table
 }
 
 // ---------------------------------------------------------------------------
-// TCP table helpers
+// Shared table row helpers (used by process, system/process, system/connection)
 // ---------------------------------------------------------------------------
 
-struct TcpRow4 {
-    local_addr: u32,
-    local_port: u32,
-    remote_addr: u32,
-    remote_port: u32,
-    pid: u32,
-}
-
-struct TcpRow6 {
-    local_addr: [u8; 16],
-    local_port: u32,
-    remote_addr: [u8; 16],
-    remote_port: u32,
-    pid: u32,
-}
-
-struct UdpRow4 {
-    local_addr: u32,
-    local_port: u32,
-    pid: u32,
-}
-
-struct UdpRow6 {
-    local_addr: [u8; 16],
-    local_port: u32,
-    pid: u32,
-}
-
-fn get_tcp4_table() -> Option<Vec<TcpRow4>> {
+pub(crate) fn get_tcp4_rows() -> Vec<MIB_TCPROW_OWNER_PID> {
     let mut size: u32 = 0;
 
     // First call: get required buffer size
@@ -176,7 +145,7 @@ fn get_tcp4_table() -> Option<Vec<TcpRow4>> {
         GetExtendedTcpTable(
             std::ptr::null_mut(),
             &mut size,
-            0, // no sort
+            0,
             AF_INET as u32,
             TCP_TABLE_OWNER_PID_ALL,
             0,
@@ -184,7 +153,7 @@ fn get_tcp4_table() -> Option<Vec<TcpRow4>> {
     }
 
     if size == 0 {
-        return None;
+        return Vec::new();
     }
 
     let mut buffer = vec![0u8; size as usize];
@@ -201,34 +170,27 @@ fn get_tcp4_table() -> Option<Vec<TcpRow4>> {
 
     if ret != 0 {
         log::warn!("GetExtendedTcpTable(AF_INET) failed: error {ret}");
-        return None;
+        return Vec::new();
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let header_size = std::mem::size_of::<u32>();
+    let header_size = std::mem::offset_of!(MIB_TCPTABLE_OWNER_PID, table);
     let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
     if header_size + count * row_size > buffer.len() {
         log::warn!("TCP4 table: dwNumEntries ({count}) exceeds buffer capacity");
-        return None;
+        return Vec::new();
     }
     let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCPROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
-        let row = unsafe { &*rows_ptr.add(i) };
-        result.push(TcpRow4 {
-            local_addr: row.dwLocalAddr,
-            local_port: row.dwLocalPort,
-            remote_addr: row.dwRemoteAddr,
-            remote_port: row.dwRemotePort,
-            pid: row.dwOwningPid,
-        });
+        result.push(unsafe { *rows_ptr.add(i) });
     }
-    Some(result)
+    result
 }
 
-fn get_tcp6_table() -> Option<Vec<TcpRow6>> {
+pub(crate) fn get_tcp6_rows() -> Vec<MIB_TCP6ROW_OWNER_PID> {
     let mut size: u32 = 0;
 
     unsafe {
@@ -243,7 +205,7 @@ fn get_tcp6_table() -> Option<Vec<TcpRow6>> {
     }
 
     if size == 0 {
-        return None;
+        return Vec::new();
     }
 
     let mut buffer = vec![0u8; size as usize];
@@ -260,34 +222,27 @@ fn get_tcp6_table() -> Option<Vec<TcpRow6>> {
 
     if ret != 0 {
         log::warn!("GetExtendedTcpTable(AF_INET6) failed: error {ret}");
-        return None;
+        return Vec::new();
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let header_size = std::mem::size_of::<u32>();
+    let header_size = std::mem::offset_of!(MIB_TCP6TABLE_OWNER_PID, table);
     let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
     if header_size + count * row_size > buffer.len() {
         log::warn!("TCP6 table: dwNumEntries ({count}) exceeds buffer capacity");
-        return None;
+        return Vec::new();
     }
     let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCP6ROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
-        let row = unsafe { &*rows_ptr.add(i) };
-        result.push(TcpRow6 {
-            local_addr: row.ucLocalAddr,
-            local_port: row.dwLocalPort,
-            remote_addr: row.ucRemoteAddr,
-            remote_port: row.dwRemotePort,
-            pid: row.dwOwningPid,
-        });
+        result.push(unsafe { *rows_ptr.add(i) });
     }
-    Some(result)
+    result
 }
 
-fn get_udp4_table() -> Option<Vec<UdpRow4>> {
+pub(crate) fn get_udp4_rows() -> Vec<MIB_UDPROW_OWNER_PID> {
     let mut size: u32 = 0;
 
     unsafe {
@@ -302,7 +257,7 @@ fn get_udp4_table() -> Option<Vec<UdpRow4>> {
     }
 
     if size == 0 {
-        return None;
+        return Vec::new();
     }
 
     let mut buffer = vec![0u8; size as usize];
@@ -319,32 +274,27 @@ fn get_udp4_table() -> Option<Vec<UdpRow4>> {
 
     if ret != 0 {
         log::warn!("GetExtendedUdpTable(AF_INET) failed: error {ret}");
-        return None;
+        return Vec::new();
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let header_size = std::mem::size_of::<u32>();
+    let header_size = std::mem::offset_of!(MIB_UDPTABLE_OWNER_PID, table);
     let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
     if header_size + count * row_size > buffer.len() {
         log::warn!("UDP4 table: dwNumEntries ({count}) exceeds buffer capacity");
-        return None;
+        return Vec::new();
     }
     let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDPROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
-        let row = unsafe { &*rows_ptr.add(i) };
-        result.push(UdpRow4 {
-            local_addr: row.dwLocalAddr,
-            local_port: row.dwLocalPort,
-            pid: row.dwOwningPid,
-        });
+        result.push(unsafe { *rows_ptr.add(i) });
     }
-    Some(result)
+    result
 }
 
-fn get_udp6_table() -> Option<Vec<UdpRow6>> {
+pub(crate) fn get_udp6_rows() -> Vec<MIB_UDP6ROW_OWNER_PID> {
     let mut size: u32 = 0;
 
     unsafe {
@@ -359,7 +309,7 @@ fn get_udp6_table() -> Option<Vec<UdpRow6>> {
     }
 
     if size == 0 {
-        return None;
+        return Vec::new();
     }
 
     let mut buffer = vec![0u8; size as usize];
@@ -376,53 +326,51 @@ fn get_udp6_table() -> Option<Vec<UdpRow6>> {
 
     if ret != 0 {
         log::warn!("GetExtendedUdpTable(AF_INET6) failed: error {ret}");
-        return None;
+        return Vec::new();
     }
 
     let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
     let count = table.dwNumEntries as usize;
-    let header_size = std::mem::size_of::<u32>();
+    let header_size = std::mem::offset_of!(MIB_UDP6TABLE_OWNER_PID, table);
     let row_size = std::mem::size_of::<MIB_UDP6ROW_OWNER_PID>();
     if header_size + count * row_size > buffer.len() {
         log::warn!("UDP6 table: dwNumEntries ({count}) exceeds buffer capacity");
-        return None;
+        return Vec::new();
     }
     let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDP6ROW_OWNER_PID;
 
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
-        let row = unsafe { &*rows_ptr.add(i) };
-        result.push(UdpRow6 {
-            local_addr: row.ucLocalAddr,
-            local_port: row.dwLocalPort,
-            pid: row.dwOwningPid,
-        });
+        result.push(unsafe { *rows_ptr.add(i) });
     }
-    Some(result)
+    result
 }
 
 // ---------------------------------------------------------------------------
-// Process name resolution
+// Process name resolution (Wide API for Unicode support)
 // ---------------------------------------------------------------------------
 
 /// Build a PID → process name mapping using CreateToolhelp32Snapshot.
+///
+/// Uses the Wide (W) API variants to correctly handle non-ASCII process names.
 pub(crate) fn build_pid_name_map() -> HashMap<u32, String> {
     let mut map = HashMap::new();
 
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
+        log::warn!("CreateToolhelp32Snapshot failed");
         return map;
     }
 
-    let mut entry: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    if unsafe { Process32First(snapshot, &mut entry) } != 0 {
+    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
         loop {
-            let name = exe_file_to_string(&entry.szExeFile);
+            let name = wide_to_string(&entry.szExeFile);
             map.insert(entry.th32ProcessID, name);
 
-            if unsafe { Process32Next(snapshot, &mut entry) } == 0 {
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
                 break;
             }
         }
@@ -432,12 +380,10 @@ pub(crate) fn build_pid_name_map() -> HashMap<u32, String> {
     map
 }
 
-/// Convert PROCESSENTRY32.szExeFile (i8/u8 array) to a Rust String.
-pub(crate) fn exe_file_to_string(bytes: &[i8]) -> String {
-    let as_u8: &[u8] =
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
-    let len = as_u8.iter().position(|&b| b == 0).unwrap_or(as_u8.len());
-    String::from_utf8_lossy(&as_u8[..len]).into_owned()
+/// Convert a null-terminated UTF-16 array to a Rust String.
+pub(crate) fn wide_to_string(chars: &[u16]) -> String {
+    let len = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+    String::from_utf16_lossy(&chars[..len])
 }
 
 #[cfg(test)]
@@ -445,26 +391,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exe_file_normal_name() {
-        let mut buf = [0i8; 260];
-        for (i, &b) in b"notepad.exe".iter().enumerate() {
-            buf[i] = b as i8;
-        }
-        assert_eq!(exe_file_to_string(&buf), "notepad.exe");
+    fn wide_to_string_normal_name() {
+        let mut buf = [0u16; 260];
+        let name: Vec<u16> = "chrome.exe".encode_utf16().collect();
+        buf[..name.len()].copy_from_slice(&name);
+        assert_eq!(wide_to_string(&buf), "chrome.exe");
     }
 
     #[test]
-    fn exe_file_empty() {
-        let buf = [0i8; 260];
-        assert_eq!(exe_file_to_string(&buf), "");
+    fn wide_to_string_empty() {
+        let buf = [0u16; 260];
+        assert_eq!(wide_to_string(&buf), "");
     }
 
     #[test]
-    fn exe_file_max_path() {
-        // Fill with 'A' up to MAX_PATH-1, then null
-        let mut buf = [0x41i8; 260];
+    fn wide_to_string_non_ascii() {
+        let mut buf = [0u16; 260];
+        let name: Vec<u16> = "测试程序.exe".encode_utf16().collect();
+        buf[..name.len()].copy_from_slice(&name);
+        assert_eq!(wide_to_string(&buf), "测试程序.exe");
+    }
+
+    #[test]
+    fn wide_to_string_max_path() {
+        let mut buf = [b'A' as u16; 260];
         buf[259] = 0;
-        assert_eq!(exe_file_to_string(&buf).len(), 259);
+        assert_eq!(wide_to_string(&buf).len(), 259);
     }
 
     #[test]
@@ -474,7 +426,7 @@ mod tests {
             // Simulate how Windows stores the port: network byte order in DWORD
             let be_bytes = port.to_be_bytes();
             let dw = u32::from_ne_bytes([be_bytes[0], be_bytes[1], 0, 0]);
-            let result = u16::from_be_bytes((dw as u16).to_ne_bytes());
+            let result = u16::from_be(dw as u16);
             assert_eq!(result, port, "port {port} roundtrip failed");
         }
     }

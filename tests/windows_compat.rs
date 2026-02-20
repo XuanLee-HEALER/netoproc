@@ -1,8 +1,9 @@
 //! Cross-platform tests for Windows-specific logic.
 //!
 //! These tests verify the correctness of algorithms used in the Windows
-//! compatibility layer. They re-implement key parsing/conversion logic
-//! from the Windows modules so they can run on any platform.
+//! compatibility layer. Where possible, they call actual production code
+//! (e.g. packet parsing). For Windows-only APIs gated by `#[cfg(target_os)]`,
+//! they necessarily re-implement the key logic so tests can run on any platform.
 //!
 //! Run with: `cargo test --test windows_compat`
 
@@ -13,14 +14,11 @@ use std::net::{IpAddr, Ipv4Addr};
 // ---------------------------------------------------------------------------
 //
 // Windows IP Helper API stores port numbers as DWORD in network byte order
-// (big-endian). On little-endian x86, a port like 80 (0x0050 BE) is stored
-// as 0x00005000 when read as a native u32. The conversion formula:
-//   u16::from_be_bytes((dwPort as u16).to_ne_bytes())
-// extracts the correct host-order port number.
+// (big-endian). The conversion: u16::from_be(dwPort as u16).
 
 /// Simulate Windows API port conversion: network byte order DWORD → host u16.
 fn win_port_from_dword(dw_port: u32) -> u16 {
-    u16::from_be_bytes((dw_port as u16).to_ne_bytes())
+    u16::from_be(dw_port as u16)
 }
 
 /// Simulate storing a known port as a Windows DWORD (network byte order in u32).
@@ -93,7 +91,9 @@ fn tc_w_1_8_port_roundtrip_all_common() {
 // The Windows capture layer receives raw IP packets (no Ethernet header).
 // It must filter by protocol: accept TCP (6), UDP (17), ICMP/ICMPv6 (1/58).
 //
-// For IPv6, we must skip extension headers to find the actual transport protocol.
+// For IPv6, we use the actual skip_ipv6_extension_headers from packet.rs.
+
+use netoproc::packet::skip_ipv6_extension_headers;
 
 /// Re-implementation of the traffic filter logic from capture/windows.rs.
 fn matches_traffic_filter(data: &[u8]) -> bool {
@@ -118,37 +118,6 @@ fn matches_traffic_filter(data: &[u8]) -> bool {
             matches!(final_proto, 6 | 17 | 58) // TCP, UDP, ICMPv6
         }
         _ => false,
-    }
-}
-
-/// Re-implementation of skip_ipv6_extension_headers from packet.rs.
-fn skip_ipv6_extension_headers(mut next_hdr: u8, data: &[u8]) -> (u8, usize) {
-    let mut offset = 0;
-    loop {
-        match next_hdr {
-            0 | 43 | 60 => {
-                // Hop-by-Hop, Routing, Destination Options
-                if offset + 2 > data.len() {
-                    return (next_hdr, offset);
-                }
-                let hdr_ext_len = data[offset + 1] as usize;
-                let total_len = (hdr_ext_len + 1) * 8;
-                if offset + total_len > data.len() {
-                    return (next_hdr, offset);
-                }
-                next_hdr = data[offset];
-                offset += total_len;
-            }
-            44 => {
-                // Fragment header: always 8 bytes
-                if offset + 8 > data.len() {
-                    return (next_hdr, offset);
-                }
-                next_hdr = data[offset];
-                offset += 8;
-            }
-            _ => return (next_hdr, offset),
-        }
     }
 }
 
@@ -514,58 +483,54 @@ fn tc_w_4_3_unknown_states_map_to_closed() {
 }
 
 // ---------------------------------------------------------------------------
-// TC-W-5: Process name extraction from null-terminated i8 array
+// TC-W-5: Process name extraction from null-terminated wide (u16) array
 // ---------------------------------------------------------------------------
 //
-// Windows PROCESSENTRY32.szExeFile is a [i8; 260] (MAX_PATH) array.
-// The exe_file_to_string function converts it to a Rust String.
+// Windows PROCESSENTRY32W.szExeFile is a [u16; 260] (MAX_PATH) array.
+// The wide_to_string function converts it to a Rust String.
 
-fn exe_file_to_string(bytes: &[i8]) -> String {
-    let as_u8: &[u8] =
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u8, bytes.len()) };
-    let len = as_u8.iter().position(|&b| b == 0).unwrap_or(as_u8.len());
-    String::from_utf8_lossy(&as_u8[..len]).into_owned()
+fn wide_to_string(chars: &[u16]) -> String {
+    let len = chars.iter().position(|&c| c == 0).unwrap_or(chars.len());
+    String::from_utf16_lossy(&chars[..len])
 }
 
 #[test]
 fn tc_w_5_1_normal_exe_name() {
-    let mut buf = [0i8; 260];
-    let name = b"chrome.exe";
-    for (i, &b) in name.iter().enumerate() {
-        buf[i] = b as i8;
-    }
-    assert_eq!(exe_file_to_string(&buf), "chrome.exe");
+    let mut buf = [0u16; 260];
+    let name: Vec<u16> = "chrome.exe".encode_utf16().collect();
+    buf[..name.len()].copy_from_slice(&name);
+    assert_eq!(wide_to_string(&buf), "chrome.exe");
 }
 
 #[test]
 fn tc_w_5_2_all_null_returns_empty() {
-    let buf = [0i8; 260];
-    assert_eq!(exe_file_to_string(&buf), "");
+    let buf = [0u16; 260];
+    assert_eq!(wide_to_string(&buf), "");
 }
 
 #[test]
 fn tc_w_5_3_no_null_terminator() {
     // Fill entire buffer with non-null values
-    let buf = [0x41i8; 32]; // 'A' repeated
-    assert_eq!(exe_file_to_string(&buf), "A".repeat(32));
+    let buf = [b'A' as u16; 32];
+    assert_eq!(wide_to_string(&buf), "A".repeat(32));
 }
 
 #[test]
 fn tc_w_5_4_embedded_null() {
-    let mut buf = [0i8; 260];
-    buf[0] = b's' as i8;
-    buf[1] = b'v' as i8;
-    buf[2] = b'c' as i8;
+    let mut buf = [0u16; 260];
+    let name: Vec<u16> = "svc".encode_utf16().collect();
+    buf[..name.len()].copy_from_slice(&name);
     buf[3] = 0; // null terminator
-    buf[4] = b'x' as i8; // should be ignored
-    assert_eq!(exe_file_to_string(&buf), "svc");
+    buf[4] = b'x' as u16; // should be ignored
+    assert_eq!(wide_to_string(&buf), "svc");
 }
 
 #[test]
-fn tc_w_5_5_single_char() {
-    let mut buf = [0i8; 260];
-    buf[0] = b'x' as i8;
-    assert_eq!(exe_file_to_string(&buf), "x");
+fn tc_w_5_5_non_ascii_unicode() {
+    let mut buf = [0u16; 260];
+    let name: Vec<u16> = "测试.exe".encode_utf16().collect();
+    buf[..name.len()].copy_from_slice(&name);
+    assert_eq!(wide_to_string(&buf), "测试.exe");
 }
 
 // ---------------------------------------------------------------------------

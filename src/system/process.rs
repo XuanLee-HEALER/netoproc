@@ -712,112 +712,99 @@ mod windows_impl {
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use windows_sys::Win32::NetworkManagement::IpHelper::{
-        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCP6ROW_OWNER_PID,
-        MIB_TCP6TABLE_OWNER_PID, MIB_TCPROW_OWNER_PID, MIB_TCPTABLE_OWNER_PID,
-        MIB_UDP6ROW_OWNER_PID, MIB_UDP6TABLE_OWNER_PID, MIB_UDPROW_OWNER_PID,
-        MIB_UDPTABLE_OWNER_PID, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_OWNER_PID,
-    };
+    use crate::process::windows as win_helpers;
     use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
     pub fn list_processes() -> Result<Vec<RawProcess>, NetopError> {
-        let pid_names = build_pid_name_map();
+        let pid_names = win_helpers::build_pid_name_map();
         let mut pid_sockets: HashMap<u32, Vec<RawSocket>> = HashMap::new();
 
         // TCP IPv4
-        if let Some(rows) = get_tcp4_rows() {
-            for row in rows {
-                let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
-                let remote_addr = IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()));
-                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
-                let remote_port = u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes());
+        for row in win_helpers::get_tcp4_rows() {
+            let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+            let remote_addr = IpAddr::V4(Ipv4Addr::from(row.dwRemoteAddr.to_ne_bytes()));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+            let remote_port = u16::from_be(row.dwRemotePort as u16);
 
-                pid_sockets
-                    .entry(row.dwOwningPid)
-                    .or_default()
-                    .push(RawSocket {
-                        fd: -1,
-                        family: 2, // AF_INET
-                        sock_type: 1, // SOCK_STREAM
-                        protocol: 6, // TCP
-                        local_addr: Some(local_addr),
-                        local_port,
-                        remote_addr: Some(remote_addr),
-                        remote_port,
-                        tcp_state: Some(row.dwState as i32),
-                    });
-            }
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET as i32,
+                    sock_type: 1, // SOCK_STREAM
+                    protocol: 6,  // TCP
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(remote_addr),
+                    remote_port,
+                    tcp_state: Some(row.dwState as i32),
+                });
         }
 
         // TCP IPv6
-        if let Some(rows) = get_tcp6_rows() {
-            for row in rows {
-                let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
-                let remote_addr = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
-                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
-                let remote_port = u16::from_be_bytes((row.dwRemotePort as u16).to_ne_bytes());
+        for row in win_helpers::get_tcp6_rows() {
+            let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+            let remote_addr = IpAddr::V6(Ipv6Addr::from(row.ucRemoteAddr));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
+            let remote_port = u16::from_be(row.dwRemotePort as u16);
 
-                pid_sockets
-                    .entry(row.dwOwningPid)
-                    .or_default()
-                    .push(RawSocket {
-                        fd: -1,
-                        family: 23, // AF_INET6 on Windows
-                        sock_type: 1,
-                        protocol: 6,
-                        local_addr: Some(local_addr),
-                        local_port,
-                        remote_addr: Some(remote_addr),
-                        remote_port,
-                        tcp_state: Some(row.dwState as i32),
-                    });
-            }
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET6 as i32,
+                    sock_type: 1,
+                    protocol: 6,
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(remote_addr),
+                    remote_port,
+                    tcp_state: Some(row.dwState as i32),
+                });
         }
 
         // UDP IPv4
-        if let Some(rows) = get_udp4_rows() {
-            for row in rows {
-                let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
-                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+        for row in win_helpers::get_udp4_rows() {
+            let local_addr = IpAddr::V4(Ipv4Addr::from(row.dwLocalAddr.to_ne_bytes()));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
 
-                pid_sockets
-                    .entry(row.dwOwningPid)
-                    .or_default()
-                    .push(RawSocket {
-                        fd: -1,
-                        family: 2,
-                        sock_type: 2, // SOCK_DGRAM
-                        protocol: 17, // UDP
-                        local_addr: Some(local_addr),
-                        local_port,
-                        remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
-                        remote_port: 0,
-                        tcp_state: None,
-                    });
-            }
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET as i32,
+                    sock_type: 2,  // SOCK_DGRAM
+                    protocol: 17,  // UDP
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                    remote_port: 0,
+                    tcp_state: None,
+                });
         }
 
         // UDP IPv6
-        if let Some(rows) = get_udp6_rows() {
-            for row in rows {
-                let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
-                let local_port = u16::from_be_bytes((row.dwLocalPort as u16).to_ne_bytes());
+        for row in win_helpers::get_udp6_rows() {
+            let local_addr = IpAddr::V6(Ipv6Addr::from(row.ucLocalAddr));
+            let local_port = u16::from_be(row.dwLocalPort as u16);
 
-                pid_sockets
-                    .entry(row.dwOwningPid)
-                    .or_default()
-                    .push(RawSocket {
-                        fd: -1,
-                        family: 23,
-                        sock_type: 2,
-                        protocol: 17,
-                        local_addr: Some(local_addr),
-                        local_port,
-                        remote_addr: Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
-                        remote_port: 0,
-                        tcp_state: None,
-                    });
-            }
+            pid_sockets
+                .entry(row.dwOwningPid)
+                .or_default()
+                .push(RawSocket {
+                    fd: -1,
+                    family: AF_INET6 as i32,
+                    sock_type: 2,
+                    protocol: 17,
+                    local_addr: Some(local_addr),
+                    local_port,
+                    remote_addr: Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+                    remote_port: 0,
+                    tcp_state: None,
+                });
         }
 
         let mut processes = Vec::new();
@@ -835,206 +822,6 @@ mod windows_impl {
         }
 
         Ok(processes)
-    }
-
-    fn get_tcp4_rows() -> Option<Vec<MIB_TCPROW_OWNER_PID>> {
-        let mut size: u32 = 0;
-        unsafe {
-            GetExtendedTcpTable(
-                std::ptr::null_mut(),
-                &mut size,
-                0,
-                AF_INET as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            );
-        }
-        if size == 0 {
-            return None;
-        }
-
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        };
-        if ret != 0 {
-            log::warn!("GetExtendedTcpTable(AF_INET) failed: error {ret}");
-            return None;
-        }
-
-        let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCPTABLE_OWNER_PID) };
-        let count = table.dwNumEntries as usize;
-        let header_size = std::mem::size_of::<u32>();
-        let row_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-        if header_size + count * row_size > buffer.len() {
-            log::warn!("TCP4 table: dwNumEntries ({count}) exceeds buffer capacity");
-            return None;
-        }
-        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCPROW_OWNER_PID;
-
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            result.push(unsafe { *rows_ptr.add(i) });
-        }
-        Some(result)
-    }
-
-    fn get_tcp6_rows() -> Option<Vec<MIB_TCP6ROW_OWNER_PID>> {
-        let mut size: u32 = 0;
-        unsafe {
-            GetExtendedTcpTable(
-                std::ptr::null_mut(),
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            );
-        }
-        if size == 0 {
-            return None;
-        }
-
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedTcpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                TCP_TABLE_OWNER_PID_ALL,
-                0,
-            )
-        };
-        if ret != 0 {
-            log::warn!("GetExtendedTcpTable(AF_INET6) failed: error {ret}");
-            return None;
-        }
-
-        let table = unsafe { &*(buffer.as_ptr() as *const MIB_TCP6TABLE_OWNER_PID) };
-        let count = table.dwNumEntries as usize;
-        let header_size = std::mem::size_of::<u32>();
-        let row_size = std::mem::size_of::<MIB_TCP6ROW_OWNER_PID>();
-        if header_size + count * row_size > buffer.len() {
-            log::warn!("TCP6 table: dwNumEntries ({count}) exceeds buffer capacity");
-            return None;
-        }
-        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_TCP6ROW_OWNER_PID;
-
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            result.push(unsafe { *rows_ptr.add(i) });
-        }
-        Some(result)
-    }
-
-    fn get_udp4_rows() -> Option<Vec<MIB_UDPROW_OWNER_PID>> {
-        let mut size: u32 = 0;
-        unsafe {
-            GetExtendedUdpTable(
-                std::ptr::null_mut(),
-                &mut size,
-                0,
-                AF_INET as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            );
-        }
-        if size == 0 {
-            return None;
-        }
-
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedUdpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        };
-        if ret != 0 {
-            log::warn!("GetExtendedUdpTable(AF_INET) failed: error {ret}");
-            return None;
-        }
-
-        let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDPTABLE_OWNER_PID) };
-        let count = table.dwNumEntries as usize;
-        let header_size = std::mem::size_of::<u32>();
-        let row_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
-        if header_size + count * row_size > buffer.len() {
-            log::warn!("UDP4 table: dwNumEntries ({count}) exceeds buffer capacity");
-            return None;
-        }
-        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDPROW_OWNER_PID;
-
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            result.push(unsafe { *rows_ptr.add(i) });
-        }
-        Some(result)
-    }
-
-    fn get_udp6_rows() -> Option<Vec<MIB_UDP6ROW_OWNER_PID>> {
-        let mut size: u32 = 0;
-        unsafe {
-            GetExtendedUdpTable(
-                std::ptr::null_mut(),
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            );
-        }
-        if size == 0 {
-            return None;
-        }
-
-        let mut buffer = vec![0u8; size as usize];
-        let ret = unsafe {
-            GetExtendedUdpTable(
-                buffer.as_mut_ptr() as *mut _,
-                &mut size,
-                0,
-                AF_INET6 as u32,
-                UDP_TABLE_OWNER_PID,
-                0,
-            )
-        };
-        if ret != 0 {
-            log::warn!("GetExtendedUdpTable(AF_INET6) failed: error {ret}");
-            return None;
-        }
-
-        let table = unsafe { &*(buffer.as_ptr() as *const MIB_UDP6TABLE_OWNER_PID) };
-        let count = table.dwNumEntries as usize;
-        let header_size = std::mem::size_of::<u32>();
-        let row_size = std::mem::size_of::<MIB_UDP6ROW_OWNER_PID>();
-        if header_size + count * row_size > buffer.len() {
-            log::warn!("UDP6 table: dwNumEntries ({count}) exceeds buffer capacity");
-            return None;
-        }
-        let rows_ptr = buffer.as_ptr().wrapping_add(header_size) as *const MIB_UDP6ROW_OWNER_PID;
-
-        let mut result = Vec::with_capacity(count);
-        for i in 0..count {
-            result.push(unsafe { *rows_ptr.add(i) });
-        }
-        Some(result)
-    }
-
-    fn build_pid_name_map() -> HashMap<u32, String> {
-        crate::process::windows::build_pid_name_map()
     }
 
     pub fn build_process_table() -> crate::model::traffic::ProcessTable {

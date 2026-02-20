@@ -1,64 +1,64 @@
-# netoproc Windows 兼容设计文档
+# netoproc Windows Compatibility Design Document
 
-> v0.5.0 目标：在现有 macOS + Linux cfg 模块切换架构上增加 Windows 支持。
+> v0.5.0 goal: Add Windows support on top of the existing macOS + Linux cfg module-switching architecture.
 
-**当前版本**: v0.4.0（macOS + Linux）
-**目标版本**: v0.5.0（macOS + Linux + Windows）
+**Current version**: v0.4.0 (macOS + Linux)
+**Target version**: v0.5.0 (macOS + Linux + Windows)
 
 ---
 
-## 1. 总体策略
+## 1. Overall Strategy
 
-### 1.1 改造范围
+### 1.1 Scope of Changes
 
-延续 v0.4.0 的 `#[cfg(target_os)]` 模块切换方案，新增 `target_os = "windows"` 分支。
-每个已有的平台抽象点添加 Windows 实现模块，导出相同的公开函数签名。
+Extending the v0.4.0 `#[cfg(target_os)]` module-switching pattern with `target_os = "windows"` branches.
+Each existing platform abstraction point gains a Windows implementation module, exporting the same public function signatures.
 
-需要新增 Windows 实现的模块：
+Modules requiring new Windows implementations:
 
-| 模块 | macOS | Linux | Windows |
+| Module | macOS | Linux | Windows |
 |------|-------|-------|---------|
-| 包捕获 | BPF `/dev/bpf*` | AF_PACKET socket | Raw socket + SIO_RCVALL |
-| 进程归属 | libproc | /proc/net/tcp + /proc/fd | GetExtendedTcpTable/UdpTable |
-| 连接状态 | sysctl pcblist_n | /proc/net/tcp[6] | GetExtendedTcpTable |
-| 进程枚举 | libproc (proc_listpids) | /proc/<pid>/stat | CreateToolhelp32Snapshot |
-| 网卡信息 | getifaddrs + AF_LINK | getifaddrs + AF_PACKET | GetAdaptersAddresses |
-| DNS 配置 | SystemConfiguration | /etc/resolv.conf | GetAdaptersAddresses DNS fields |
-| 权限检查 | getuid + /dev/bpf0 access | getuid + AF_PACKET test | IsUserAnAdmin / raw socket test |
-| 信号处理 | signal(SIGTERM/SIGINT) | signal(SIGTERM/SIGINT) | SetConsoleCtrlHandler |
+| Packet capture | BPF `/dev/bpf*` | AF_PACKET socket | Raw socket + SIO_RCVALL |
+| Process attribution | libproc | /proc/net/tcp + /proc/fd | GetExtendedTcpTable/UdpTable |
+| Connection state | sysctl pcblist_n | /proc/net/tcp[6] | GetExtendedTcpTable |
+| Process enumeration | libproc (proc_listpids) | /proc/<pid>/stat | CreateToolhelp32Snapshot |
+| Interface info | getifaddrs + AF_LINK | getifaddrs + AF_PACKET | GetAdaptersAddresses |
+| DNS configuration | SystemConfiguration | /etc/resolv.conf | GetAdaptersAddresses DNS fields |
+| Privilege check | getuid + /dev/bpf0 access | getuid + AF_PACKET test | IsUserAnAdmin / raw socket test |
+| Signal handling | signal(SIGTERM/SIGINT) | signal(SIGTERM/SIGINT) | SetConsoleCtrlHandler |
 
-不需要改动的代码（~95%）：
-- `PacketSummary` / `SocketKey` / `TrafficStats` 数据结构
-- 共享的 IP/TCP/UDP/DNS 包解析（packet.rs, dns.rs）
-- channel 模型与三线程架构
-- TUI 渲染层（ratatui + crossterm 原生支持 Windows）
-- snapshot / monitor 模式逻辑
-- enrichment（dns_resolver.rs 使用 dns-lookup crate，跨平台）
+Code not requiring changes (~95%):
+- `PacketSummary` / `SocketKey` / `TrafficStats` data structures
+- Shared IP/TCP/UDP/DNS packet parsing (packet.rs, dns.rs)
+- Channel model and three-thread architecture
+- TUI rendering layer (ratatui + crossterm natively support Windows)
+- Snapshot / monitor mode logic
+- Enrichment (dns_resolver.rs uses dns-lookup crate, cross-platform)
 
-### 1.2 目录结构变更
+### 1.2 Directory Structure Changes
 
 ```
 src/
 ├── capture/
-│   ├── mod.rs          ← 添加 #[cfg(target_os = "windows")] 路由
+│   ├── mod.rs          ← add #[cfg(target_os = "windows")] routing
 │   ├── macos.rs
 │   ├── linux.rs
-│   └── windows.rs      ← 新增：RawSocketCapture
+│   └── windows.rs      ← new: RawSocketCapture
 ├── process/
-│   ├── mod.rs          ← 添加 #[cfg(target_os = "windows")] 路由
+│   ├── mod.rs          ← add #[cfg(target_os = "windows")] routing
 │   ├── macos.rs
 │   ├── linux.rs
-│   └── windows.rs      ← 新增：GetExtendedTcpTable + GetExtendedUdpTable
+│   └── windows.rs      ← new: GetExtendedTcpTable + GetExtendedUdpTable
 ├── system/
-│   ├── process.rs      ← 添加 #[cfg(target_os = "windows")] 段
-│   ├── connection.rs   ← 添加 #[cfg(target_os = "windows")] 段
-│   ├── interface.rs    ← 添加 #[cfg(target_os = "windows")] 段
-│   └── dns_config.rs   ← 添加 #[cfg(target_os = "windows")] 段
-├── main.rs             ← 信号处理、接口发现 Windows 分支
-└── error.rs            ← 添加 WinApi 错误变体
+│   ├── process.rs      ← add #[cfg(target_os = "windows")] section
+│   ├── connection.rs   ← add #[cfg(target_os = "windows")] section
+│   ├── interface.rs    ← add #[cfg(target_os = "windows")] section
+│   └── dns_config.rs   ← add #[cfg(target_os = "windows")] section
+├── main.rs             ← signal handling, interface discovery Windows branch
+└── error.rs            ← add WinApi error variant
 ```
 
-### 1.3 依赖变更
+### 1.3 Dependency Changes
 
 ```toml
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -73,47 +73,47 @@ windows-sys = { version = "0.59", features = [
 ] }
 ```
 
-### 1.4 交叉编译验证
+### 1.4 Cross-Compilation Verification
 
 ```bash
-# 安装 cross
+# Install cross
 cargo install cross
 
-# 验证 Windows GNU 目标编译通过
+# Verify Windows GNU target compiles
 cross build --target x86_64-pc-windows-gnu
 
-# 同时验证 macOS/Linux 不受影响
-cargo check  # 当前平台
+# Also verify macOS/Linux are unaffected
+cargo check  # current platform
 ```
 
 ---
 
-## 2. PacketCapture（包捕获）
+## 2. PacketCapture
 
-### 2.1 Windows 方案：Raw Socket + SIO_RCVALL
+### 2.1 Windows Approach: Raw Socket + SIO_RCVALL
 
-Windows 没有 BPF 或 AF_PACKET。使用 Winsock2 原始套接字：
+Windows has neither BPF nor AF_PACKET. Uses Winsock2 raw sockets:
 
 ```
 socket(AF_INET, SOCK_RAW, IPPROTO_IP)
 → bind(interface_ip)
-→ WSAIoctl(SIO_RCVALL, RCVALL_ON)  // 接收所有 IP 包
-→ recv() 返回完整 IP 包（无以太网头）
+→ WSAIoctl(SIO_RCVALL, RCVALL_ON)  // receive all IP packets
+→ recv() returns complete IP packets (no Ethernet header)
 ```
 
-**关键差异**：
-- 收到的是 raw IP 包（无 Ethernet header），使用 `packet::parse_raw_frame()` 解析
-- 每个 socket 绑定到一个 interface IP（不是 interface name）
-- 需要 Administrator 权限
-- IPv4 和 IPv6 需要分别用 AF_INET/AF_INET6 socket
+**Key differences**:
+- Receives raw IP packets (no Ethernet header), parsed via `packet::parse_raw_frame()`
+- Each socket binds to an interface IP (not interface name)
+- Requires Administrator privileges
+- IPv4 and IPv6 need separate AF_INET/AF_INET6 sockets
 
-**过滤策略**：
-- macOS/Linux 用硬件 BPF filter 在内核层过滤
-- Windows 在用户空间做软件过滤（性能略低，但对监控工具可接受）
-- Traffic capture：只保留 TCP/UDP/ICMP 包
-- DNS capture：只保留 port 53 的包
+**Filtering strategy**:
+- macOS/Linux use hardware BPF filters at the kernel level
+- Windows performs software filtering in userspace (slightly lower performance, acceptable for a monitoring tool)
+- Traffic capture: keep only TCP/UDP/ICMP packets
+- DNS capture: keep only port 53 packets
 
-### 2.2 导出 API（与 macOS/Linux 一致）
+### 2.2 Exported API (consistent with macOS/Linux)
 
 ```rust
 pub type PlatformCapture = RawSocketCapture;
@@ -123,41 +123,41 @@ pub fn open_capture_devices(...) -> Result<(Vec<PlatformCapture>, Option<Platfor
 pub fn capture_stats(cap: &PlatformCapture) -> Option<CaptureStats>
 ```
 
-PlatformCapture 实现的方法：
+PlatformCapture methods:
 - `read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError>`
 - `read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError>`
 - `interface(&self) -> &str`
 
-### 2.3 已知限制
+### 2.3 Known Limitations
 
-- SIO_RCVALL 在某些 Windows 版本（如 Home Edition）可能受限
-- 出站包捕获可能不完整（取决于 Windows 版本和网络驱动）
-- 无法在同一 socket 上同时捕获 IPv4 和 IPv6（需要两个 socket）
-- 本实现先支持 IPv4 捕获，IPv6 可后续扩展
+- SIO_RCVALL may be restricted on some Windows editions (e.g., Home Edition)
+- Outbound packet capture may be incomplete (depends on Windows version and network driver)
+- Cannot capture both IPv4 and IPv6 on a single socket (requires two sockets)
+- This implementation supports IPv4 capture first; IPv6 can be extended later
 
 ---
 
-## 3. ProcessTable（进程归属）
+## 3. ProcessTable (Process Attribution)
 
-### 3.1 Windows 方案：IP Helper API
+### 3.1 Windows Approach: IP Helper API
 
-Windows 提供比 Linux/macOS 更直接的 socket-to-PID 映射：
+Windows provides more direct socket-to-PID mapping than Linux/macOS:
 
 ```
 GetExtendedTcpTable(TCP_TABLE_OWNER_PID_ALL)
-  → MIB_TCPTABLE_OWNER_PID → 每行包含 (local_addr, local_port, remote_addr, remote_port, state, owning_pid)
+  → MIB_TCPTABLE_OWNER_PID → each row contains (local_addr, local_port, remote_addr, remote_port, state, owning_pid)
 
 GetExtendedUdpTable(UDP_TABLE_OWNER_PID)
-  → MIB_UDPTABLE_OWNER_PID → 每行包含 (local_addr, local_port, owning_pid)
+  → MIB_UDPTABLE_OWNER_PID → each row contains (local_addr, local_port, owning_pid)
 ```
 
-无需 Linux 那样的三步关联（inode → fd → pid），Windows 直接给出 PID。
+No need for the Linux three-step correlation (inode → fd → pid); Windows directly provides the PID.
 
-进程名通过 `CreateToolhelp32Snapshot` + `Process32First/Next` 获取。
+Process names are obtained via `CreateToolhelp32Snapshot` + `Process32FirstW/NextW` (Wide API for Unicode support).
 
-### 3.2 TCP 状态映射
+### 3.2 TCP State Mapping
 
-Windows MIB_TCP_STATE 枚举值：
+Windows MIB_TCP_STATE enum values:
 ```
 1=CLOSED, 2=LISTEN, 3=SYN_SENT, 4=SYN_RCVD,
 5=ESTAB, 6=FIN_WAIT1, 7=FIN_WAIT2, 8=CLOSE_WAIT,
@@ -166,32 +166,32 @@ Windows MIB_TCP_STATE 枚举值：
 
 ---
 
-## 4. 系统 API 实现
+## 4. System API Implementations
 
 ### 4.1 system/interface.rs
 
-使用 `GetAdaptersAddresses(AF_UNSPEC)` 替代 `getifaddrs`：
-- 返回 `IP_ADAPTER_ADDRESSES` 链表
-- 包含 IPv4/IPv6 地址、DNS 服务器、接口状态
-- 接口统计通过 `GetIfEntry2` 获取（字节/包计数）
+Uses `GetAdaptersAddresses(AF_UNSPEC)` instead of `getifaddrs`:
+- Returns `IP_ADAPTER_ADDRESSES` linked list
+- Contains IPv4/IPv6 addresses, DNS servers, interface status
+- Interface statistics via `GetIfEntry2` (byte/packet counters)
 
 ### 4.2 system/dns_config.rs
 
-DNS 配置从 `GetAdaptersAddresses` 的 `FirstDnsServerAddress` 链表提取。
+DNS configuration extracted from `GetAdaptersAddresses` `FirstDnsServerAddress` linked list.
 
 ### 4.3 system/process.rs
 
-进程枚举使用 `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32First/Next`。
+Process enumeration uses `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` + `Process32FirstW/NextW`.
 
 ### 4.4 system/connection.rs
 
-TCP/UDP 连接使用 `GetExtendedTcpTable`/`GetExtendedUdpTable`。
+TCP/UDP connections via `GetExtendedTcpTable`/`GetExtendedUdpTable`.
 
 ---
 
-## 5. main.rs 变更
+## 5. main.rs Changes
 
-### 5.1 信号处理
+### 5.1 Signal Handling
 
 ```rust
 #[cfg(windows)]
@@ -215,29 +215,29 @@ unsafe extern "system" fn ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 ```
 
-### 5.2 接口发现
+### 5.2 Interface Discovery
 
-Windows 不使用 `libc::IFF_UP`/`libc::IFF_LOOPBACK`。
-为 `RawInterface` 添加 `is_loopback()` 方法，在各平台实现中正确设置 flags。
-定义共享的 flag 常量：`FLAG_UP = 0x1`, `FLAG_LOOPBACK = 0x8`。
+Windows does not use `libc::IFF_UP`/`libc::IFF_LOOPBACK`.
+`RawInterface` has `is_loopback()` method, with platform-specific flag constants:
+`FLAG_UP = 0x1`, `FLAG_LOOPBACK = 0x8`.
 
 ---
 
-## 6. 验证计划
+## 6. Verification Plan
 
-### 6.1 编译验证（在 Linux 环境使用 cross）
+### 6.1 Compilation Verification (using cross on Linux)
 
 ```bash
 cross build --target x86_64-pc-windows-gnu
 ```
 
-### 6.2 运行时测试清单（需要 Windows 环境）
+### 6.2 Runtime Test Checklist (requires Windows environment)
 
-- [ ] Raw socket 能正常创建（需要 Administrator）
-- [ ] SIO_RCVALL 启用后能收到 IP 包
-- [ ] IPv4 包解析正确（使用 parse_raw_frame）
-- [ ] GetExtendedTcpTable 返回正确的连接和 PID
-- [ ] 进程名通过 CreateToolhelp32Snapshot 正确获取
-- [ ] GetAdaptersAddresses 返回接口信息
-- [ ] TUI 在 Windows Terminal 中正常渲染
-- [ ] Ctrl-C 触发优雅关闭
+- [ ] Raw socket can be created normally (requires Administrator)
+- [ ] SIO_RCVALL captures IP packets after enable
+- [ ] IPv4 packet parsing is correct (using parse_raw_frame)
+- [ ] GetExtendedTcpTable returns correct connections and PIDs
+- [ ] Process names correctly obtained via CreateToolhelp32Snapshot
+- [ ] GetAdaptersAddresses returns interface information
+- [ ] TUI renders correctly in Windows Terminal
+- [ ] Ctrl-C triggers graceful shutdown
