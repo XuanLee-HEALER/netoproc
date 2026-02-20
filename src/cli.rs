@@ -43,6 +43,12 @@ pub struct Cli {
     /// Filter by pattern
     #[arg(long)]
     pub filter: Option<String>,
+
+    /// Linux capture backend: auto (detect eBPF, fallback to AF_PACKET),
+    /// ebpf (force eBPF kprobe), or afpacket (force AF_PACKET raw socket).
+    /// Ignored on macOS.
+    #[arg(long = "capture-mode", default_value = "auto")]
+    pub capture_mode: CaptureMode,
 }
 
 impl Cli {
@@ -67,6 +73,16 @@ pub enum OutputFormat {
     Tsv,
     Json,
     Pretty,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Auto-detect: try eBPF first, fall back to AF_PACKET
+    Auto,
+    /// Force eBPF kprobe mode (requires Linux kernel 5.8+ with BTF)
+    Ebpf,
+    /// Force AF_PACKET raw socket mode (works on all Linux kernels)
+    Afpacket,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,5 +310,33 @@ mod tests {
         assert_eq!(cli.bpf_buffer, 65536);
         assert!(cli.no_color);
         assert_eq!(cli.filter, Some("curl".to_string()));
+    }
+
+    // UT-9.23: Capture mode default is auto
+    #[test]
+    fn test_capture_mode_default() {
+        let cli = parsed(&["netoproc"]);
+        assert_eq!(cli.capture_mode, CaptureMode::Auto);
+    }
+
+    // UT-9.24: Capture mode ebpf
+    #[test]
+    fn test_capture_mode_ebpf() {
+        let cli = parsed(&["netoproc", "--capture-mode", "ebpf"]);
+        assert_eq!(cli.capture_mode, CaptureMode::Ebpf);
+    }
+
+    // UT-9.25: Capture mode afpacket
+    #[test]
+    fn test_capture_mode_afpacket() {
+        let cli = parsed(&["netoproc", "--capture-mode", "afpacket"]);
+        assert_eq!(cli.capture_mode, CaptureMode::Afpacket);
+    }
+
+    // UT-9.26: Invalid capture mode
+    #[test]
+    fn test_capture_mode_invalid() {
+        let result = parse(&["netoproc", "--capture-mode", "pcap"]);
+        assert!(result.is_err());
     }
 }

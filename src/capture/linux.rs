@@ -103,7 +103,10 @@ impl AfPacketCapture {
         // 3. Bind to interface
         let mut sll: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
-        sll.sll_protocol = (ETH_P_ALL as u16).to_be();
+        #[allow(clippy::unnecessary_cast)]
+        {
+            sll.sll_protocol = (ETH_P_ALL as u16).to_be();
+        }
         sll.sll_ifindex = if_index as i32;
 
         let ret = unsafe {
@@ -393,12 +396,64 @@ pub fn check_capture_access() -> Result<(), NetopError> {
 }
 
 /// Open capture devices for the specified interfaces.
+///
+/// The `capture_mode` parameter controls which backend to use:
+/// - `Auto`: try eBPF first (if compiled with `ebpf` feature), fall back to AF_PACKET
+/// - `Ebpf`: force eBPF, return error if unavailable
+/// - `Afpacket`: force AF_PACKET (current default behavior)
 pub fn open_capture_devices(
     interfaces: &[String],
     buffer_size: u32,
     dns_enabled: bool,
+    capture_mode: crate::cli::CaptureMode,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
-    // Collect local IPs for direction detection
+    use crate::cli::CaptureMode;
+
+    match capture_mode {
+        CaptureMode::Ebpf => {
+            #[cfg(feature = "ebpf")]
+            {
+                return try_open_ebpf(interfaces, buffer_size, dns_enabled, false);
+            }
+            #[cfg(not(feature = "ebpf"))]
+            {
+                return Err(NetopError::EbpfProgram(
+                    "eBPF support not compiled in (build with --features ebpf)".to_string(),
+                ));
+            }
+        }
+        CaptureMode::Auto => {
+            #[cfg(feature = "ebpf")]
+            {
+                if super::ebpf::ebpf_available() {
+                    match try_open_ebpf(interfaces, buffer_size, dns_enabled, true) {
+                        Ok(result) => return Ok(result),
+                        Err(e) => {
+                            log::warn!(
+                                "eBPF initialization failed, falling back to AF_PACKET: {e}"
+                            );
+                            // Fall through to AF_PACKET below
+                        }
+                    }
+                } else {
+                    log::info!("eBPF not available on this kernel, using AF_PACKET");
+                }
+            }
+        }
+        CaptureMode::Afpacket => {
+            // Fall through to AF_PACKET below
+        }
+    }
+
+    open_afpacket_devices(interfaces, buffer_size, dns_enabled)
+}
+
+/// Open AF_PACKET capture devices (the original implementation).
+fn open_afpacket_devices(
+    interfaces: &[String],
+    buffer_size: u32,
+    dns_enabled: bool,
+) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
     let local_ips = collect_local_ips()?;
 
     let mut captures = Vec::new();
@@ -433,6 +488,34 @@ pub fn open_capture_devices(
     };
 
     Ok((captures, dns_capture))
+}
+
+/// Attempt to open eBPF capture devices.
+///
+/// The `_allow_fallback` parameter is reserved for Phase 2, where it will
+/// control whether eBPF load failures are fatal or trigger AF_PACKET fallback.
+#[cfg(feature = "ebpf")]
+fn try_open_ebpf(
+    interfaces: &[String],
+    _buffer_size: u32,
+    _dns_enabled: bool,
+    _allow_fallback: bool,
+) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
+    // Phase 1: EbpfCapture::try_new() always returns Err (stub).
+    // Phase 2: this will load the eBPF program and return capture devices.
+    let iface = interfaces
+        .first()
+        .ok_or_else(|| NetopError::EbpfProgram("no interfaces to monitor".to_string()))?;
+
+    // Try to create eBPF capture — Phase 1 stub returns Err here.
+    let _ebpf = super::ebpf::EbpfCapture::try_new(iface)?;
+
+    // Phase 2: When eBPF works, the traffic capture thread will poll BPF maps
+    // instead of reading raw packets. DNS still uses AF_PACKET since kprobes
+    // don't capture packet content.
+    Err(NetopError::EbpfProgram(
+        "eBPF capture device construction not yet implemented".to_string(),
+    ))
 }
 
 /// Get capture statistics (Linux has no kernel-level BPF stats).

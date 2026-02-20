@@ -1,0 +1,10 @@
+[package]
+name = "netoproc-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types between netoproc eBPF kernel programs and userspace"
+publish = false
+
+# No external dependencies — #![no_std] compatible.
+# Phase 2: add optional aya dependency for Pod trait impls.
+[dependencies]

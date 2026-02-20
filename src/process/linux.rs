@@ -218,14 +218,14 @@ fn map_inodes_to_pids(inode_to_socket: &HashMap<u64, SocketEntry>) -> HashMap<u6
             };
 
             let link_str = link.to_string_lossy();
-            if let Some(inode) = parse_socket_inode(&link_str) {
-                if inode_to_socket.contains_key(&inode) {
-                    if !found_socket {
-                        found_socket = true;
-                    }
-                    let proc_name = read_proc_comm(pid);
-                    result.insert(inode, (pid, proc_name));
+            if let Some(inode) = parse_socket_inode(&link_str)
+                && inode_to_socket.contains_key(&inode)
+            {
+                if !found_socket {
+                    found_socket = true;
                 }
+                let proc_name = read_proc_comm(pid);
+                result.insert(inode, (pid, proc_name));
             }
         }
     }

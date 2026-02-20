@@ -51,7 +51,7 @@ fn install_signal_handlers() {
 fn exit_code(err: &NetopError) -> i32 {
     match err {
         NetopError::InsufficientPermission(_) => 1,
-        NetopError::BpfDevice(_) | NetopError::CaptureDevice(_) => 2,
+        NetopError::BpfDevice(_) | NetopError::CaptureDevice(_) | NetopError::EbpfProgram(_) => 2,
         NetopError::Tui(_) => 4,
         NetopError::Fatal(_) => 4,
         _ => 4,
@@ -89,6 +89,18 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 0. Install signal handlers for graceful shutdown.
     install_signal_handlers();
 
+    // 0b. Validate --capture-mode on non-Linux platforms.
+    #[cfg(not(target_os = "linux"))]
+    {
+        use netoproc::cli::CaptureMode;
+        if cli.capture_mode != CaptureMode::Auto {
+            eprintln!(
+                "warning: --capture-mode is only supported on Linux, ignoring '{:?}'",
+                cli.capture_mode
+            );
+        }
+    }
+
     // 1. Check capture device access.
     capture::check_capture_access()?;
 
@@ -106,7 +118,7 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 4. Open capture devices.
     let dns_enabled = !cli.no_dns;
     let (traffic_captures, dns_capture) =
-        capture::open_capture_devices(&interfaces, cli.bpf_buffer, dns_enabled)?;
+        capture::open_capture_devices(&interfaces, cli.bpf_buffer, dns_enabled, cli.capture_mode)?;
 
     if traffic_captures.is_empty() {
         return Err(NetopError::CaptureDevice(
