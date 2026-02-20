@@ -493,6 +493,14 @@ fn open_bpf_device() -> Result<OwnedFd, NetopError> {
         match err.raw_os_error() {
             Some(libc::EBUSY) => continue,
             Some(libc::ENOENT) => break,
+            Some(libc::EACCES) => {
+                // All BPF devices share the same permissions; no point trying others.
+                return Err(NetopError::BpfDevice(
+                    "permission denied on /dev/bpf*. Run with sudo or set up \
+                     BPF permissions: sudo bash scripts/install-bpf.sh"
+                        .to_string(),
+                ));
+            }
             _ => {
                 return Err(NetopError::BpfDevice(format!(
                     "open {} failed: {}",

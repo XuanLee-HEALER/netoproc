@@ -1,7 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub enum NetopError {
-    #[error("netoproc requires root privileges. Run with: sudo netoproc")]
-    NotRoot,
+    #[error("{0}")]
+    InsufficientPermission(String),
     #[error("cannot open BPF device: {0}")]
     BpfDevice(String),
     #[error("sysctl error: {0}")]

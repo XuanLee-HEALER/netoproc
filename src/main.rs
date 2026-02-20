@@ -47,7 +47,7 @@ fn install_signal_handlers() {
 /// Exit codes per netoproc-requirements.md §9
 fn exit_code(err: &NetopError) -> i32 {
     match err {
-        NetopError::NotRoot => 1,
+        NetopError::InsufficientPermission(_) => 1,
         NetopError::BpfDevice(_) => 2,
         NetopError::Tui(_) => 4,
         NetopError::Fatal(_) => 4,
@@ -86,8 +86,8 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     // 0. Install signal handlers for graceful shutdown.
     install_signal_handlers();
 
-    // 1. Check root.
-    privilege::check_root()?;
+    // 1. Check BPF device access (root or access_bpf group member).
+    privilege::check_bpf_access()?;
 
     // 2. Determine interfaces to monitor.
     let interfaces = discover_interfaces(&cli)?;

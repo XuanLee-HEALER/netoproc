@@ -61,10 +61,21 @@ install:
     mkdir -p ~/.config/fish/completions
     cp completions/netoproc.fish ~/.config/fish/completions/
     @echo "Installed netoproc and fish completions"
+    @echo ""
+    @echo "To run without sudo, set up BPF permissions:"
+    @echo "  just setup-bpf"
 
 # Generate and open documentation
 doc:
     cargo doc --no-deps --open
+
+# Set up BPF permissions (run netoproc without sudo)
+setup-bpf:
+    sudo bash scripts/install-bpf.sh
+
+# Remove BPF permissions
+remove-bpf:
+    sudo bash scripts/uninstall-bpf.sh
 
 # Run tests and lint in sequence (pre-commit check)
 ci: lint test

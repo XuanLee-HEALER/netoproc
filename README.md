@@ -33,7 +33,7 @@ sudo ./target/release/netoproc
 - macOS 26.0+ (see [Platform Status](#platform-status) below)
 - [Rust](https://www.rust-lang.org/tools/install) stable toolchain
 - [just](https://github.com/casey/just) task runner (optional but recommended)
-- Root privileges (`sudo`) for BPF device access
+- Root privileges (`sudo`) or BPF group permissions (see [Running without sudo](#running-without-sudo))
 
 ## Usage
 
@@ -60,6 +60,24 @@ sudo netoproc --filter firefox
 ```
 
 See [docs/netoproc-usage.md](docs/netoproc-usage.md) for the complete user guide.
+
+### Running without sudo
+
+netoproc supports running without `sudo` by setting up BPF device permissions:
+
+```bash
+just setup-bpf    # one-time setup, requires sudo
+# Log out and back in, then:
+netoproc           # no sudo needed
+```
+
+> **Note**: Without root, process visibility is limited to the current
+> user. Use `sudo netoproc` for full cross-process monitoring.
+
+To remove the BPF permission configuration:
+```bash
+just remove-bpf
+```
 
 ## Features
 
@@ -94,7 +112,7 @@ See [docs/netoproc-design.md](docs/netoproc-design.md) for the full architecture
 Priorities for future development:
 
 1. **Cross-platform support** — Linux compatibility (via `AF_PACKET` / eBPF) and Windows support as the top priority
-2. **Privilege model** — Reduce the need for full root access; explore capabilities-based approaches on Linux, BPF device group permissions on macOS
+2. ~~**Privilege model** — Reduce the need for full root access; explore capabilities-based approaches on Linux, BPF device group permissions on macOS~~ (done for macOS — see [Running without sudo](#running-without-sudo))
 3. **UI improvements** — Richer TUI views, per-connection sparklines, configurable layouts, and theme support
 
 ## Development

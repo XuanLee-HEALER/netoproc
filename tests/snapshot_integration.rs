@@ -189,7 +189,10 @@ fn tc_1_7_snapshot_bpf_buffer() {
 // Section 2: Permission checks (TC-2.x)
 // =========================================================================
 
-/// TC-2.1: Non-root exits with code 1.
+/// TC-2.1: Non-root without BPF group exits with code 1 or 2.
+///
+/// If the user has BPF group access (access_bpf), the binary may succeed
+/// without root — in that case the test is skipped.
 #[test]
 fn tc_2_1_non_root_exit_code() {
     if is_root() {
@@ -203,18 +206,22 @@ fn tc_2_1_non_root_exit_code() {
         .output()
         .expect("failed to execute");
 
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "expected exit code 1, got {:?}",
-        output.status.code()
+    let code = output.status.code().unwrap_or(-1);
+    if code == 0 {
+        // User has BPF access without root (access_bpf group member).
+        eprintln!("SKIPPED: user has BPF access without root");
+        return;
+    }
+
+    assert!(
+        code == 1 || code == 2,
+        "expected exit code 1 or 2, got {code}"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("root") || stderr.contains("privilege"),
-        "stderr should mention root/privilege, got: {}",
-        stderr
+        stderr.contains("permission") || stderr.contains("sudo") || stderr.contains("BPF"),
+        "stderr should mention permission/sudo/BPF, got: {stderr}"
     );
 }
 

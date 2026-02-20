@@ -1,12 +1,36 @@
 use crate::bpf::{BpfCapture, FilterKind};
 use crate::error::NetopError;
 
-/// Check that we are running as root. BPF device access requires root.
-pub fn check_root() -> Result<(), NetopError> {
-    if unsafe { libc::getuid() } != 0 {
-        return Err(NetopError::NotRoot);
+/// Check that we have BPF device access.
+///
+/// Three outcomes:
+/// - UID 0 (root): pass immediately.
+/// - Non-root with read access to `/dev/bpf0` (e.g. `access_bpf` group member):
+///   pass with a warning about limited process visibility.
+/// - Neither: return `InsufficientPermission` with guidance.
+pub fn check_bpf_access() -> Result<(), NetopError> {
+    // Root always has access.
+    if unsafe { libc::getuid() } == 0 {
+        return Ok(());
     }
-    Ok(())
+
+    // Check if we can read /dev/bpf0 (group permission via access_bpf).
+    let path = std::ffi::CString::new("/dev/bpf0")
+        .map_err(|_| NetopError::Fatal("invalid path".to_string()))?;
+    if unsafe { libc::access(path.as_ptr(), libc::R_OK) } == 0 {
+        log::warn!(
+            "Running without root: process visibility limited to current user. \
+             For full visibility, run with: sudo netoproc"
+        );
+        return Ok(());
+    }
+
+    Err(NetopError::InsufficientPermission(
+        "netoproc requires BPF device access. Either:\n  \
+         1. Run with sudo: sudo netoproc\n  \
+         2. Set up BPF permissions: sudo bash scripts/install-bpf.sh"
+            .to_string(),
+    ))
 }
 
 /// Open BPF capture devices for the specified interfaces.
