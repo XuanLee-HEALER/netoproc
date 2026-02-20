@@ -23,3 +23,11 @@ log = "0.4"
 env_logger = "0.11"
 rustc-hash = "2"
 dns-lookup = "2"
+
+[features]
+default = []
+ebpf = ["dep:aya", "dep:aya-log"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13", optional = true }
+aya-log = { version = "0.2", optional = true }

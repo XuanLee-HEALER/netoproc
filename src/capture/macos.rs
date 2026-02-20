@@ -27,10 +27,13 @@ pub fn check_capture_access() -> Result<(), NetopError> {
 }
 
 /// Open capture devices for the specified interfaces.
+///
+/// On macOS, `_capture_mode` is ignored — BPF is the only backend.
 pub fn open_capture_devices(
     interfaces: &[String],
     buffer_size: u32,
     dns_enabled: bool,
+    _capture_mode: crate::cli::CaptureMode,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
     crate::privilege::open_bpf_devices(interfaces, buffer_size, dns_enabled)
 }

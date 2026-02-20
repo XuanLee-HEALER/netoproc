@@ -563,10 +563,10 @@ mod linux_impl {
                 };
 
                 let link_str = link.to_string_lossy();
-                if let Some(inode) = crate::process::linux::parse_socket_inode(&link_str) {
-                    if inode_to_socket.contains_key(&inode) {
-                        pid_sockets.entry(pid).or_default().push(inode);
-                    }
+                if let Some(inode) = crate::process::linux::parse_socket_inode(&link_str)
+                    && inode_to_socket.contains_key(&inode)
+                {
+                    pid_sockets.entry(pid).or_default().push(inode);
                 }
             }
         }
@@ -679,10 +679,10 @@ mod linux_impl {
         let path = format!("/proc/{pid}/status");
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("Uid:") {
-                    if let Some(uid_str) = rest.split_whitespace().next() {
-                        return uid_str.parse().unwrap_or(0);
-                    }
+                if let Some(rest) = line.strip_prefix("Uid:")
+                    && let Some(uid_str) = rest.split_whitespace().next()
+                {
+                    return uid_str.parse().unwrap_or(0);
                 }
             }
         }

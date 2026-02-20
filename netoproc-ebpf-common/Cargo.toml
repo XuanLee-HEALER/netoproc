@@ -1,0 +1,13 @@
+[package]
+name = "netoproc-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared types between netoproc eBPF kernel programs and userspace"
+publish = false
+
+[features]
+default = []
+user = ["aya"]
+
+[dependencies]
+aya = { version = "0.13", optional = true }
