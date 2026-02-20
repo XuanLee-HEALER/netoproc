@@ -456,6 +456,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "netoproc-ebpf-common",
  "ratatui",
  "rustc-hash",
  "serde",
