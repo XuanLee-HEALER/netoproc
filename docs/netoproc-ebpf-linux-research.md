@@ -1,197 +1,203 @@
-# eBPF Linux 抓包方案调研：从 AF_PACKET 迁移到 eBPF
+# eBPF Linux Capture Research: Migrating from AF_PACKET to eBPF
 
-> 调研目标：评估 Linux 上用 eBPF 替代/补充当前 AF_PACKET 方案的可行性、内核兼容性、Rust 生态支持，
-> 以及最终采用"可选模式"还是"直接替换"的策略决策。
-
----
-
-## 1. 当前架构现状
-
-netoproc v0.4.0 Linux 端采用 **AF_PACKET raw socket** 进行包捕获（`src/capture/linux.rs`），
-进程归因则通过 `/proc/net/tcp[6]` + `/proc/<pid>/fd/` 进行 inode-to-PID 关联。
-
-### 1.1 AF_PACKET 方案的痛点
-
-| 问题 | 说明 |
-|------|------|
-| **进程归因存在竞态** | `/proc/net/tcp` 与 `/proc/<pid>/fd/` 之间存在 TOCTOU 窗口，短生命周期连接易丢失 |
-| **UDP 归因能力弱** | `/proc/net/udp` 中 remote 地址始终为 `0.0.0.0:0`，导致 SocketKey 匹配困难 |
-| **无内核级 PID 关联** | AF_PACKET 在网卡层捕获帧，完全没有进程上下文，只能靠用户态 polling `/proc` 间接关联 |
-| **出站包重复** | AF_PACKET 默认收到 `PACKET_OUTGOING` 副本，需额外逻辑过滤 |
-| **容器支持有限** | `/proc/net/tcp` 只显示当前 network namespace 的连接 |
-
-### 1.2 eBPF 能解决什么
-
-eBPF 的核心优势是可以在 **内核态直接获取进程上下文**。通过 kprobe 挂载到
-`tcp_sendmsg`/`tcp_recvmsg`/`udp_sendmsg`/`udp_recvmsg` 等内核函数，
-eBPF 程序可以在函数调用点直接读取 `current->pid`、`current->comm`、cgroup ID，
-消除了 AF_PACKET + `/proc` 轮询方案的竞态问题。
+> Research objective: Evaluate the feasibility, kernel compatibility, and Rust ecosystem support
+> for replacing or supplementing the current AF_PACKET approach with eBPF on Linux,
+> and decide between an "optional mode" vs "direct replacement" strategy.
 
 ---
 
-## 2. eBPF 内核版本支持调研
+## 1. Current Architecture
 
-### 2.1 关键功能与最低内核版本
+netoproc v0.4.0 on Linux uses **AF_PACKET raw sockets** for packet capture (`src/capture/linux.rs`),
+with process attribution via `/proc/net/tcp[6]` + `/proc/<pid>/fd/` inode-to-PID correlation.
 
-| eBPF 功能 | 最低内核版本 | 说明 |
-|-----------|------------|------|
-| `bpf()` 系统调用 + Maps | 3.18 | eBPF 基础设施 |
-| BPF 附加到 socket | 3.19 | socket filter |
-| BPF 附加到 kprobe | **4.1** | 用于挂载 tcp_sendmsg 等 |
-| Tail calls | 4.2 | 程序链式调用 |
-| BPF 附加到 tracepoint | 4.7 | tracepoint 比 kprobe 更稳定 |
-| XDP (eXpress Data Path) | 4.8 | 高性能入站处理（无进程上下文） |
-| BPF 附加到 perf events | 4.9 | 性能事件采集 |
-| BPF 附加到 cgroup | 4.10 | cgroup 级别 socket 过滤 |
-| sock_ops | 4.13 | socket 级别操作回调 |
-| Bounded loops | 5.3 | 循环语句支持 |
-| BPF ring buffer | **5.8** | 高效内核→用户态数据传输 |
-| `CAP_BPF` / `CAP_PERFMON` | **5.8** | 细粒度权限替代 root |
-| CO-RE (Compile Once Run Everywhere) | ~5.2+ | 需要 BTF 信息 (`CONFIG_DEBUG_INFO_BTF=y`) |
-| BTF 内核类型信息 | ~5.2+ | CO-RE 的前置依赖 |
-| TCX (TC eXpress) | 6.6 | 新一代 TC attach 方式 |
+### 1.1 Pain Points of the AF_PACKET Approach
 
-### 2.2 对 netoproc 的实际需求
+| Issue | Description |
+|-------|-------------|
+| **Process attribution has race conditions** | TOCTOU window between `/proc/net/tcp` and `/proc/<pid>/fd/`; short-lived connections are easily missed |
+| **Weak UDP attribution** | Remote address in `/proc/net/udp` is always `0.0.0.0:0`, making SocketKey matching difficult |
+| **No kernel-level PID correlation** | AF_PACKET captures frames at the NIC layer with no process context; relies on userspace `/proc` polling |
+| **Outbound packet duplication** | AF_PACKET receives `PACKET_OUTGOING` copies by default; requires extra filtering logic |
+| **Limited container support** | `/proc/net/tcp` only shows connections in the current network namespace |
 
-netoproc 的 eBPF 方案需要以下功能：
+### 1.2 What eBPF Solves
 
-1. **kprobe 附加** (4.1+)：挂载到 `tcp_sendmsg`, `tcp_recvmsg`, `udp_sendmsg`, `udp_recvmsg`
-2. **BPF Maps** (3.18+)：用于内核态聚合 PID → 流量统计
-3. **BPF ring buffer** (5.8+) 或 **perf buffer** (4.9+)：将事件传递到用户态
-4. **CO-RE/BTF** (5.2+)：避免为每个内核版本编译不同的 eBPF 程序
-
-**实际最低需求：Linux 4.9+**（使用 perf buffer），**推荐 5.8+**（使用 ring buffer + CAP_BPF）。
-
-如果要求 CO-RE 跨版本兼容（推荐），则最低 **5.2+**（需要 BTF）。
-
-### 2.3 主流发行版内核版本对照
-
-| 发行版 | 版本 | 内核版本 | eBPF 支持等级 | EOL |
-|--------|------|---------|-------------|-----|
-| **RHEL 7** | 7.9 | 3.10 (backport) | 仅 Tech Preview，不推荐 | 2024-06 已 EOL |
-| **RHEL 8** | 8.2+ | 4.18 (大量回移) | kprobe/tracepoint 可用，无 BTF | 2029 |
-| **RHEL 8** | 8.6+ | 4.18 (更多回移) | Cilium 等工具的最低版本 | 2029 |
-| **RHEL 9** | 9.0+ | 5.14 | 完整 eBPF 支持 | 2032 |
-| **Ubuntu 20.04** | LTS | 5.4 | 基本 CO-RE，BTF 需手动开启 | 2025-04 |
-| **Ubuntu 22.04** | LTS | 5.15 | 完整 BTF/CO-RE | 2027-04 |
-| **Ubuntu 24.04** | LTS | 6.8 | 全功能 | 2029-04 |
-| **Debian 11** | Bullseye | 5.10 | 完整 eBPF | 2026-06 |
-| **Debian 12** | Bookworm | 6.1 | 全功能 | 2028 |
-| **Fedora 39+** | Rolling | 6.5+ | 全功能 | ~ |
-| **Arch** | Rolling | Latest | 全功能 | ~ |
-| **SUSE 15 SP4+** | Enterprise | 5.14 | 完整 eBPF | 2031 |
-
-### 2.4 关键结论
-
-- **RHEL 7 已 EOL**，不需要支持。
-- **RHEL 8**（4.18 内核）通过回移支持大量 eBPF 功能，但 **没有 BTF**，CO-RE 无法使用，需要预编译的 eBPF 程序或运行时编译。
-- **从 kernel 5.8 开始**，所有主要 eBPF 功能（ring buffer, CAP_BPF, BTF）都已完备。
-- **从 kernel 5.10 开始**（Debian 11, RHEL 9, Ubuntu 22.04），可以认为 eBPF **在所有主流发行版上普遍可用**。
-- 2026 年时间点上，仍在支持周期内的发行版中 RHEL 8 是唯一没有 BTF 的主流平台。
+The core advantage of eBPF is **kernel-level process context**. By attaching kprobes to
+`tcp_sendmsg`/`tcp_recvmsg`/`udp_sendmsg`/`udp_recvmsg`, an eBPF program can read
+`current->pid`, `current->comm`, and cgroup ID directly at the call site,
+eliminating the race conditions inherent in the AF_PACKET + `/proc` polling approach.
 
 ---
 
-## 3. eBPF vs AF_PACKET 对比
+## 2. eBPF Kernel Version Support
 
-| 维度 | AF_PACKET | eBPF (kprobe) |
-|------|-----------|---------------|
-| **进程归因** | 间接（/proc 轮询，竞态） | 直接（内核态 PID/comm） |
-| **UDP 归因** | 困难（remote=0.0.0.0） | 直接（挂载点有完整 socket 信息） |
-| **短连接归因** | 易丢失 | 不丢失（每次 send/recv 都触发） |
-| **性能开销** | 中高（全包拷贝到用户态） | 低（内核态聚合，只传统计数据） |
-| **容器感知** | 无（限制在 namespace 内） | 有（cgroup ID, namespace ID） |
-| **完整包数据** | 有 | 可选（但增加复杂度） |
-| **DNS 解析** | 有（可捕获 DNS 包内容） | 需额外挂载点或 socket filter |
-| **内核版本要求** | Linux 2.2+ | 4.9+（最低），5.8+（推荐） |
-| **实现复杂度** | 低 | 中高（eBPF 程序 + 加载器） |
-| **调试难度** | 低 | 中（eBPF verifier 限制） |
+### 2.1 Key Features and Minimum Kernel Versions
 
-### 3.1 eBPF 的核心优势
+| eBPF Feature | Minimum Kernel | Description |
+|-------------|----------------|-------------|
+| `bpf()` syscall + Maps | 3.18 | eBPF infrastructure |
+| BPF attach to socket | 3.19 | Socket filter |
+| BPF attach to kprobe | **4.1** | For hooking tcp_sendmsg etc. |
+| Tail calls | 4.2 | Program chaining |
+| BPF attach to tracepoint | 4.7 | More stable than kprobes |
+| XDP (eXpress Data Path) | 4.8 | High-performance ingress processing (no process context) |
+| BPF attach to perf events | 4.9 | Performance event collection |
+| BPF attach to cgroup | 4.10 | cgroup-level socket filtering |
+| sock_ops | 4.13 | Socket-level operation callbacks |
+| Bounded loops | 5.3 | Loop statement support |
+| BPF ring buffer | **5.8** | Efficient kernel→userspace data transfer |
+| `CAP_BPF` / `CAP_PERFMON` | **5.8** | Fine-grained permissions replacing root |
+| CO-RE (Compile Once Run Everywhere) | ~5.2+ | Requires BTF (`CONFIG_DEBUG_INFO_BTF=y`) |
+| BTF kernel type info | ~5.2+ | Prerequisite for CO-RE |
+| TCX (TC eXpress) | 6.6 | Next-gen TC attach mechanism |
 
-1. **消除进程归因竞态**：这是最大的改进。AF_PACKET 方案下，netoproc 每 500ms 轮询一次 `/proc`，
-   短于 500ms 的连接可能完全归入 Unknown。eBPF kprobe 在每次 socket 操作时触发，
-   可以 100% 准确地将流量归因到进程。
+### 2.2 Actual Requirements for netoproc
 
-2. **更低的 CPU 开销**：AF_PACKET 将完整帧拷贝到用户态再解析，eBPF 在内核态直接提取
-   5-tuple + PID + 字节数，通过 BPF map 聚合后只将统计结果发送到用户态。
+netoproc's eBPF approach requires:
 
-3. **更好的 UDP 支持**：AF_PACKET 方案下 UDP 进程归因几乎是靠运气（`/proc/net/udp`
-   的 remote 始终为 0），eBPF 在 `udp_sendmsg` 挂载点可以直接读取目标地址。
+1. **kprobe attach** (4.1+): Hook into `tcp_sendmsg`, `tcp_recvmsg`, `udp_sendmsg`, `udp_recvmsg`
+2. **BPF Maps** (3.18+): Kernel-side aggregation of PID → traffic statistics
+3. **BPF ring buffer** (5.8+) or **perf buffer** (4.9+): Event delivery to userspace
+4. **CO-RE/BTF** (5.2+): Avoid compiling different eBPF programs per kernel version
 
-### 3.2 eBPF 的不足
+**Practical minimum: Linux 4.9+** (using perf buffer), **recommended 5.8+** (ring buffer + CAP_BPF).
 
-1. **无法直接获取完整包内容**：kprobe 方案获取的是 socket 级别的统计数据（字节数），
-   不是原始网络帧。如果需要 DNS 解析（读取 DNS 响应内容），仍需 AF_PACKET 或
-   额外的 socket filter eBPF 程序。
+For CO-RE cross-version compatibility (recommended): minimum **5.2+** (requires BTF).
 
-2. **内核版本限制**：RHEL 8 等旧平台的 BTF 缺失是实际问题。
+### 2.3 Mainstream Distribution Kernel Versions
 
-3. **开发和调试门槛更高**：eBPF 程序受 verifier 限制（栈大小、循环、指针安全），
-   开发体验不如普通用户态代码。
+| Distribution | Version | Kernel Version | eBPF Support Level | EOL |
+|-------------|---------|---------------|-------------------|-----|
+| **RHEL 7** | 7.9 | 3.10 (backport) | Tech Preview only, not recommended | 2024-06 (EOL) |
+| **RHEL 8** | 8.2+ | 4.18 (extensive backports) | kprobe/tracepoint available, no BTF | 2029 |
+| **RHEL 8** | 8.6+ | 4.18 (more backports) | Minimum version for Cilium etc. | 2029 |
+| **RHEL 9** | 9.0+ | 5.14 | Full eBPF support | 2032 |
+| **Ubuntu 20.04** | LTS | 5.4 | Basic CO-RE, BTF requires manual enable | 2025-04 |
+| **Ubuntu 22.04** | LTS | 5.15 | Full BTF/CO-RE | 2027-04 |
+| **Ubuntu 24.04** | LTS | 6.8 | Full-featured | 2029-04 |
+| **Debian 11** | Bullseye | 5.10 | Full eBPF | 2026-06 |
+| **Debian 12** | Bookworm | 6.1 | Full-featured | 2028 |
+| **Fedora 39+** | Rolling | 6.5+ | Full-featured | ~ |
+| **Arch** | Rolling | Latest | Full-featured | ~ |
+| **SUSE 15 SP4+** | Enterprise | 5.14 | Full eBPF | 2031 |
 
----
+### 2.4 Key Conclusions
 
-## 4. Rust eBPF 生态
-
-### 4.1 可选的 Rust eBPF 框架
-
-| 框架 | 内核代码语言 | C/LLVM 依赖 | 维护状态 | CO-RE 支持 | 异步支持 |
-|------|------------|------------|---------|-----------|---------|
-| **Aya** | Rust | 无 | 活跃 (2024-2025) | 有 | tokio + async-std |
-| **libbpf-rs** | C | libbpf (C) | 活跃 | 有 | 有限 |
-| **RedBPF** | Rust | LLVM | **已停止维护** | 部分 | 有限 |
-
-### 4.2 推荐：Aya
-
-**Aya** 是目前 Rust eBPF 生态的最佳选择，原因：
-
-1. **纯 Rust**：内核态和用户态代码都用 Rust 编写，无需 C 工具链。
-2. **无外部依赖**：不依赖 libbpf、bcc、LLVM，只需 `libc` crate。
-3. **CO-RE 支持**：配合 BTF 和 musl 静态链接，可实现真正的 compile-once-run-everywhere。
-4. **生产级采用**：
-   - Kubernetes SIG 的 Blixt（Gateway API 负载均衡器）
-   - Red Hat 的 bpfman（eBPF 程序加载守护进程）
-   - RustNet（网络监控 TUI，和 netoproc 目标类似）
-5. **与 netoproc 的契合**：
-   - netoproc 已经是纯 Rust 项目，无 C 依赖
-   - Aya 不引入新的 C 工具链依赖
-   - Aya 支持 kprobe 附加，符合我们的需求
-
-### 4.3 参考项目
-
-| 项目 | 技术栈 | 说明 |
-|------|--------|------|
-| **RustNet** (`rustnet-monitor`) | Rust + Aya eBPF | 网络监控 TUI，eBPF 失败时回退到 procfs |
-| **Bandix** | Rust + eBPF | 流量监控，支持 DNS + IPv6 |
-| **ayaFlow** | Rust + Aya | K8s 网络分析，TC classifier + ring buffer |
-| **pktstat-bpf** | Go + eBPF | TC/XDP/KProbe 多模式流量监控 |
+- **RHEL 7 is EOL** — no need to support.
+- **RHEL 8** (kernel 4.18) has extensive eBPF backports but **no BTF**, so CO-RE is unavailable. Requires precompiled eBPF programs or runtime compilation.
+- **From kernel 5.8 onwards**, all major eBPF features (ring buffer, CAP_BPF, BTF) are fully available.
+- **From kernel 5.10 onwards** (Debian 11, RHEL 9, Ubuntu 22.04), eBPF can be considered **universally available across all mainstream distributions**.
+- As of 2026, RHEL 8 is the only mainstream platform still within its support lifecycle that lacks BTF.
 
 ---
 
-## 5. 策略决策：可选模式 vs 直接替换
+## 3. eBPF vs AF_PACKET Comparison
 
-### 5.1 结论：**应作为可选模式，不应直接替换 AF_PACKET**
+| Dimension | AF_PACKET | eBPF (kprobe) |
+|-----------|-----------|---------------|
+| **Process attribution** | Indirect (/proc polling, race conditions) | Direct (kernel-side PID/comm) |
+| **UDP attribution** | Difficult (remote=0.0.0.0) | Direct (hook point has full socket info) |
+| **Short-lived connection attribution** | Easily missed | Never missed (triggers on every send/recv) |
+| **Performance overhead** | Medium-high (full packet copy to userspace) | Low (kernel-side aggregation, only statistics sent) |
+| **Container awareness** | None (limited to current namespace) | Yes (cgroup ID, namespace ID) |
+| **Full packet data** | Yes | Optional (but adds complexity) |
+| **DNS parsing** | Yes (can capture DNS packet content) | Requires additional hook or socket filter |
+| **Kernel version requirement** | Linux 2.2+ | 4.9+ (minimum), 5.8+ (recommended) |
+| **Implementation complexity** | Low | Medium-high (eBPF program + loader) |
+| **Debugging difficulty** | Low | Medium (eBPF verifier constraints) |
 
-理由如下：
+### 3.1 Core Advantages of eBPF
 
-#### 必须保留 AF_PACKET 的原因
+1. **Eliminates process attribution race conditions**: This is the biggest improvement. Under AF_PACKET,
+   netoproc polls `/proc` every 500ms — connections shorter than 500ms may be entirely attributed to Unknown.
+   eBPF kprobes trigger on every socket operation, enabling 100% accurate process attribution.
 
-1. **RHEL 8 兼容性**：RHEL 8 (EOL 2029) 内核 4.18 无 BTF，CO-RE 不可用。
-   虽然可以为 RHEL 8 预编译 eBPF 程序，但增加大量复杂性。
-   AF_PACKET 在所有 Linux 版本上都能工作。
+2. **Lower CPU overhead**: AF_PACKET copies full frames to userspace for parsing. eBPF extracts
+   the 5-tuple + PID + byte count directly in the kernel, aggregates via BPF maps,
+   and sends only statistics to userspace.
 
-2. **DNS 捕获需要**：eBPF kprobe 方案获取的是 socket 级别统计，
-   不包含 DNS 响应的具体内容。netoproc 的 DNS 解析功能
-   （反向域名查找）仍需原始包捕获。保留 AF_PACKET 用于 DNS 捕获
-   是合理的混合方案。
+3. **Better UDP support**: Under AF_PACKET, UDP process attribution is nearly guesswork
+   (`/proc/net/udp` remote is always 0). eBPF hooks on `udp_sendmsg` can directly read
+   the destination address.
 
-3. **渐进式迁移**：一次性替换风险太大。作为可选模式引入，
-   可以逐步验证 eBPF 方案的正确性，收集用户反馈后再决定是否默认化。
+### 3.2 Limitations of eBPF
 
-4. **容错回退**：RustNet 的做法值得参考——eBPF 加载失败时自动回退到 procfs。
-   netoproc 可以采用类似策略：eBPF 模式失败时回退到 AF_PACKET + /proc。
+1. **Cannot directly capture full packet content**: The kprobe approach captures socket-level
+   statistics (byte counts), not raw network frames. DNS parsing (reading DNS response content)
+   still requires AF_PACKET or an additional eBPF socket filter program.
 
-#### 推荐架构
+2. **Kernel version constraints**: Lack of BTF on older platforms like RHEL 8 is a practical issue.
+
+3. **Higher development and debugging barrier**: eBPF programs are constrained by the verifier
+   (stack size, loops, pointer safety), making the development experience less ergonomic
+   than regular userspace code.
+
+---
+
+## 4. Rust eBPF Ecosystem
+
+### 4.1 Available Rust eBPF Frameworks
+
+| Framework | Kernel Code Language | C/LLVM Dependency | Maintenance Status | CO-RE Support | Async Support |
+|-----------|---------------------|-------------------|-------------------|--------------|--------------|
+| **Aya** | Rust | None | Active (2024-2025) | Yes | tokio + async-std |
+| **libbpf-rs** | C | libbpf (C) | Active | Yes | Limited |
+| **RedBPF** | Rust | LLVM | **Unmaintained** | Partial | Limited |
+
+### 4.2 Recommendation: Aya
+
+**Aya** is currently the best choice in the Rust eBPF ecosystem:
+
+1. **Pure Rust**: Both kernel-side and userspace code are written in Rust; no C toolchain needed.
+2. **No external dependencies**: Does not depend on libbpf, bcc, or LLVM; only `libc` crate.
+3. **CO-RE support**: With BTF and musl static linking, achieves true compile-once-run-everywhere.
+4. **Production adoption**:
+   - Kubernetes SIG's Blixt (Gateway API load balancer)
+   - Red Hat's bpfman (eBPF program loading daemon)
+   - RustNet (network monitoring TUI, similar goal to netoproc)
+5. **Alignment with netoproc**:
+   - netoproc is already a pure Rust project with no C dependencies
+   - Aya does not introduce new C toolchain dependencies
+   - Aya supports kprobe attach, matching our requirements
+
+### 4.3 Reference Projects
+
+| Project | Tech Stack | Description |
+|---------|-----------|-------------|
+| **RustNet** (`rustnet-monitor`) | Rust + Aya eBPF | Network monitoring TUI, falls back to procfs when eBPF fails |
+| **Bandix** | Rust + eBPF | Traffic monitor with DNS + IPv6 support |
+| **ayaFlow** | Rust + Aya | K8s network analysis, TC classifier + ring buffer |
+| **pktstat-bpf** | Go + eBPF | TC/XDP/KProbe multi-mode traffic monitor |
+
+---
+
+## 5. Strategy Decision: Optional Mode vs Direct Replacement
+
+### 5.1 Conclusion: **Should be an optional mode; AF_PACKET must be retained**
+
+Rationale:
+
+#### Reasons to Retain AF_PACKET
+
+1. **RHEL 8 compatibility**: RHEL 8 (EOL 2029) has kernel 4.18 without BTF; CO-RE is unavailable.
+   While precompiled eBPF programs for RHEL 8 are possible, they add significant complexity.
+   AF_PACKET works on all Linux versions.
+
+2. **DNS capture requirement**: The eBPF kprobe approach captures socket-level statistics,
+   not actual DNS response content. netoproc's DNS parsing feature (reverse domain lookup)
+   still requires raw packet capture. Retaining AF_PACKET for DNS capture
+   is a reasonable hybrid approach.
+
+3. **Incremental migration**: A full replacement is too risky in one step. Introducing eBPF
+   as an optional mode allows gradual validation of correctness, user feedback collection,
+   and an informed decision about making it the default.
+
+4. **Graceful fallback**: RustNet's approach is worth emulating — when eBPF loading fails,
+   automatically fall back to procfs. netoproc can adopt a similar strategy:
+   fall back to AF_PACKET + /proc when eBPF mode fails.
+
+#### Recommended Architecture
 
 ```
 ┌───────────────────────────────────────────────────────┐
@@ -200,7 +206,7 @@ netoproc 的 eBPF 方案需要以下功能：
 └──────────────────┬────────────────────────────────────┘
                    │
           ┌────────▼────────┐
-          │  CaptureBackend  │  (运行时选择)
+          │  CaptureBackend  │  (runtime selection)
           │  enum dispatch   │
           └──┬───────────┬──┘
              │           │
@@ -208,44 +214,44 @@ netoproc 的 eBPF 方案需要以下功能：
     │ eBPF mode  │  │ AF_PACKET    │
     │ (kprobe)   │  │ mode         │
     │            │  │              │
-    │ PID: 内核态│  │ PID: /proc   │
-    │ 统计: map  │  │ 包捕获: raw  │
-    │ DNS: 需    │  │ DNS: 有      │
-    │   额外处理 │  │              │
+    │ PID: kernel│  │ PID: /proc   │
+    │ stats: map │  │ capture: raw │
+    │ DNS: needs │  │ DNS: yes     │
+    │  extra work│  │              │
     └────────────┘  └──────────────┘
 ```
 
-**默认行为 (`--capture-mode=auto`)**：
-1. 检测内核版本 >= 5.8 且 BTF 可用 → 使用 eBPF
-2. 否则 → 回退到 AF_PACKET
+**Default behavior (`--capture-mode=auto`)**:
+1. Detect kernel version >= 5.8 and BTF available → use eBPF
+2. Otherwise → fall back to AF_PACKET
 
-**DNS 处理**：
-- eBPF 模式下，DNS 捕获仍可使用 AF_PACKET socket filter（仅用于 port 53）
-- 或者通过 eBPF socket filter 挂载到 DNS 流量
+**DNS handling**:
+- In eBPF mode, DNS capture can still use AF_PACKET socket filter (port 53 only)
+- Or attach an eBPF socket filter to DNS traffic
 
-### 5.2 实现路线图
+### 5.2 Implementation Roadmap
 
-#### Phase 1：基础 eBPF kprobe 模式
-- 引入 `aya` + `aya-ebpf` 依赖
-- 编写 kprobe eBPF 程序挂载 `tcp_sendmsg`/`tcp_recvmsg`
-- 用户态通过 BPF map 读取 PID → 流量统计
-- `--capture-mode=ebpf` CLI 选项
+#### Phase 1: Basic eBPF kprobe mode
+- Introduce `aya` + `aya-ebpf` dependencies
+- Write kprobe eBPF program hooking `tcp_sendmsg`/`tcp_recvmsg`
+- Userspace reads PID → traffic statistics via BPF map
+- `--capture-mode=ebpf` CLI option
 
-#### Phase 2：UDP 支持 + DNS
-- 添加 `udp_sendmsg`/`udp_recvmsg` kprobe
-- DNS 解析方案（AF_PACKET fallback 或 eBPF socket filter）
+#### Phase 2: UDP support + DNS
+- Add `udp_sendmsg`/`udp_recvmsg` kprobes
+- DNS parsing solution (AF_PACKET fallback or eBPF socket filter)
 
-#### Phase 3：auto 模式 + 回退
-- 内核版本 / BTF 检测
-- `--capture-mode=auto` 作为默认值
-- eBPF 加载失败时优雅回退到 AF_PACKET
+#### Phase 3: Auto mode + fallback
+- Kernel version / BTF detection
+- `--capture-mode=auto` as default
+- Graceful fallback to AF_PACKET on eBPF load failure
 
-#### Phase 4：高级功能
-- cgroup 感知（容器流量归因）
-- ring buffer 替代 perf buffer（5.8+ 内核）
-- 可选的 XDP 加速路径
+#### Phase 4: Advanced features
+- cgroup awareness (container traffic attribution)
+- Ring buffer replacing perf buffer (kernel 5.8+)
+- Optional XDP fast path
 
-### 5.3 Cargo.toml 变更预估
+### 5.3 Estimated Cargo.toml Changes
 
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -257,56 +263,56 @@ default = ["ebpf"]
 ebpf = ["aya", "aya-log"]
 ```
 
-使用 feature flag，不需要 eBPF 的用户可以 `--no-default-features` 编译纯 AF_PACKET 版本。
+Users who do not need eBPF can compile a pure AF_PACKET version with `--no-default-features`.
 
 ---
 
-## 6. 权限模型变更
+## 6. Permission Model Changes
 
-eBPF 模式需要额外的 capabilities：
+eBPF mode requires additional capabilities:
 
-| Capability | AF_PACKET 模式 | eBPF 模式 | 说明 |
-|-----------|---------------|----------|------|
-| `CAP_NET_RAW` | 需要 | 需要（如果 DNS 用 AF_PACKET） | 创建原始 socket |
-| `CAP_NET_ADMIN` | 需要 | 需要 | 混杂模式 |
-| `CAP_SYS_PTRACE` | 需要 | 不再需要 | eBPF 在内核态直接获取 PID |
-| `CAP_BPF` | 不需要 | **需要** (5.8+) | 加载 eBPF 程序 |
-| `CAP_PERFMON` | 不需要 | **需要** (5.8+) | kprobe attach |
-| `CAP_SYS_ADMIN` | 不需要 | 需要 (<5.8) | 5.8 之前替代 CAP_BPF |
+| Capability | AF_PACKET Mode | eBPF Mode | Description |
+|-----------|---------------|----------|-------------|
+| `CAP_NET_RAW` | Required | Required (if DNS uses AF_PACKET) | Create raw sockets |
+| `CAP_NET_ADMIN` | Required | Required | Promiscuous mode |
+| `CAP_SYS_PTRACE` | Required | No longer needed | eBPF gets PID directly in kernel |
+| `CAP_BPF` | Not needed | **Required** (5.8+) | Load eBPF programs |
+| `CAP_PERFMON` | Not needed | **Required** (5.8+) | kprobe attach |
+| `CAP_SYS_ADMIN` | Not needed | Required (<5.8) | Pre-5.8 substitute for CAP_BPF |
 
-**5.8+ 内核**：`CAP_BPF + CAP_PERFMON` 替代了 `CAP_SYS_PTRACE`，权限粒度更细。
-**< 5.8 内核**：需要 `CAP_SYS_ADMIN`（权限更大，但这些旧内核本身也需要 root）。
+**Kernel 5.8+**: `CAP_BPF + CAP_PERFMON` replaces `CAP_SYS_PTRACE`, providing finer-grained permissions.
+**Kernel < 5.8**: Requires `CAP_SYS_ADMIN` (broader permissions, but these older kernels typically require root anyway).
 
-install-linux.sh 需要相应更新，根据捕获模式设置不同的 capabilities。
-
----
-
-## 7. 风险与缓解
-
-| 风险 | 影响 | 缓解措施 |
-|------|------|---------|
-| eBPF verifier 拒绝程序 | 功能不可用 | 充分测试 + auto 回退到 AF_PACKET |
-| 内核 API 变更 (kprobe 不稳定) | 特定内核版本不兼容 | 使用 tracepoint（更稳定）作为备选挂载点 |
-| Aya crate breaking changes | 编译失败 | 锁定 Aya 版本，跟进上游 |
-| RHEL 8 用户无法使用 eBPF | 降级到 AF_PACKET | auto 模式自动检测并回退 |
-| 编译产物增大 | 二进制体积增加 | eBPF 作为 feature flag，可选编译 |
-| eBPF 程序需要嵌入二进制 | 部署复杂度增加 | Aya 支持将 eBPF ELF 嵌入 Rust 二进制 |
+install-linux.sh must be updated accordingly, setting different capabilities based on capture mode.
 
 ---
 
-## 8. 总结
+## 7. Risks and Mitigations
 
-| 问题 | 回答 |
-|------|------|
-| 是否所有发行版都支持 eBPF？ | **否**。RHEL 8 (4.18) 支持有限（无 BTF），RHEL 7 已 EOL。从 kernel 5.10 起（Debian 11, RHEL 9, Ubuntu 22.04）可认为普遍可用 |
-| 应该可选还是替换？ | **可选模式**。通过 `--capture-mode=auto\|ebpf\|afpacket` 控制，默认 auto 检测 |
-| 推荐的 Rust 框架？ | **Aya**。纯 Rust，无外部依赖，活跃维护，生产级采用 |
-| 最低内核要求？ | eBPF 模式：5.8+（推荐），4.9+（最低，功能受限）；AF_PACKET 模式：任意 Linux |
-| DNS 捕获方案？ | 混合模式：eBPF 负责进程归因 + 流量统计，AF_PACKET（或 eBPF socket filter）负责 DNS 包内容捕获 |
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| eBPF verifier rejects program | Feature unavailable | Thorough testing + auto fallback to AF_PACKET |
+| Kernel API changes (kprobes are unstable) | Incompatibility with specific kernel versions | Use tracepoints (more stable) as alternative hook points |
+| Aya crate breaking changes | Compilation failure | Pin Aya version, track upstream |
+| RHEL 8 users cannot use eBPF | Downgrade to AF_PACKET | Auto mode detects and falls back automatically |
+| Larger build artifacts | Binary size increase | eBPF as feature flag, optional compilation |
+| eBPF program must be embedded in binary | Deployment complexity | Aya supports embedding eBPF ELF in Rust binary |
 
 ---
 
-## 参考资料
+## 8. Summary
+
+| Question | Answer |
+|----------|--------|
+| Do all distributions support eBPF? | **No.** RHEL 8 (4.18) has limited support (no BTF); RHEL 7 is EOL. From kernel 5.10 onwards (Debian 11, RHEL 9, Ubuntu 22.04), eBPF can be considered universally available |
+| Optional mode or replacement? | **Optional mode.** Controlled via `--capture-mode=auto\|ebpf\|afpacket`, default auto-detect |
+| Recommended Rust framework? | **Aya.** Pure Rust, no external dependencies, actively maintained, production adoption |
+| Minimum kernel requirement? | eBPF mode: 5.8+ (recommended), 4.9+ (minimum, limited features); AF_PACKET mode: any Linux |
+| DNS capture approach? | Hybrid: eBPF handles process attribution + traffic stats; AF_PACKET (or eBPF socket filter) handles DNS packet content capture |
+
+---
+
+## References
 
 - [BCC Kernel Versions Reference](https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md)
 - [eBPF.io - What is eBPF](https://ebpf.io/what-is-ebpf/)
@@ -314,7 +320,7 @@ install-linux.sh 需要相应更新，根据捕获模式设置不同的 capabili
 - [eBPF Ecosystem Progress 2024-2025](https://eunomia.dev/blog/2025/02/12/ebpf-ecosystem-progress-in-20242025-a-technical-deep-dive/)
 - [Red Hat eBPF in RHEL 7](https://www.redhat.com/en/blog/introduction-ebpf-red-hat-enterprise-linux-7)
 - [Cilium System Requirements](https://docs.cilium.io/en/stable/operations/system_requirements/)
-- [pktstat-bpf (Go eBPF 流量监控)](https://github.com/dkorunic/pktstat-bpf)
+- [pktstat-bpf (Go eBPF traffic monitor)](https://github.com/dkorunic/pktstat-bpf)
 - [RustNet Monitor](https://crates.io/crates/rustnet-monitor)
 - [Microsoft Defender eBPF Sensor Requirements](https://learn.microsoft.com/en-us/defender-endpoint/linux-support-ebpf)
 - [FOSDEM 2025: Building eBPF with Rust and Aya](https://archive.fosdem.org/2025/events/attachments/fosdem-2025-5534-building-your-ebpf-program-with-rust-and-aya/slides/238267/Building_7AI18W8.pdf)

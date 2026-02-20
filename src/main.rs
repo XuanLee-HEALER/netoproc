@@ -95,8 +95,12 @@ fn run(cli: Cli) -> Result<(), NetopError> {
         use netoproc::cli::CaptureMode;
         if cli.capture_mode != CaptureMode::Auto {
             eprintln!(
-                "warning: --capture-mode is only supported on Linux, ignoring '{:?}'",
-                cli.capture_mode
+                "warning: --capture-mode is only supported on Linux, ignoring '{}'",
+                match cli.capture_mode {
+                    CaptureMode::Ebpf => "ebpf",
+                    CaptureMode::Afpacket => "afpacket",
+                    CaptureMode::Auto => "auto",
+                }
             );
         }
     }

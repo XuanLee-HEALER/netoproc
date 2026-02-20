@@ -24,6 +24,9 @@ env_logger = "0.11"
 rustc-hash = "2"
 dns-lookup = "2"
 
+[workspace]
+members = [".", "netoproc-ebpf-common"]
+
 [features]
 default = []
 # Phase 1: ebpf feature enables detection code and stub backend.
