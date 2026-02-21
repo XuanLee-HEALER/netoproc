@@ -38,6 +38,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
+  markdownlint:
+    name: Lint (Markdown)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: "**/*.md"
+          config: ".markdownlint-cli2.yaml"
+
   # ---------------------------------------------------------------------------
   # Unit tests — macOS (stable + beta)
   # ---------------------------------------------------------------------------
@@ -162,7 +172,7 @@ jobs:
   build:
     name: Build release (macOS)
     runs-on: macos-latest
-    needs: [fmt, clippy, test, test-linux, test-windows]
+    needs: [fmt, clippy, markdownlint, test, test-linux, test-windows]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
