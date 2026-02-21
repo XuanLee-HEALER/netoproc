@@ -1,13 +1,13 @@
 # netoproc
 
-> Per-process network traffic monitor for macOS and Linux
+> Per-process network traffic monitor for macOS, Linux, and Windows
 
 [![CI](https://github.com/XuanLee-HEALER/netoproc/actions/workflows/ci.yml/badge.svg)](https://github.com/XuanLee-HEALER/netoproc/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## Overview
 
-netoproc is a terminal-based network monitoring tool that shows per-process network traffic in real time. On macOS it captures packet headers via BPF (Berkeley Packet Filter); on Linux it uses AF_PACKET raw sockets. Traffic is attributed to processes through socket-level correlation with platform-specific system APIs.
+netoproc is a terminal-based network monitoring tool that shows per-process network traffic in real time. On macOS it captures packet headers via BPF (Berkeley Packet Filter); on Linux it uses AF_PACKET raw sockets; on Windows it uses Winsock2 raw sockets with `SIO_RCVALL`. Traffic is attributed to processes through socket-level correlation with platform-specific system APIs.
 
 ## Installation
 
@@ -114,7 +114,7 @@ See [docs/netoproc-design.md](docs/netoproc-design.md) for the full architecture
 | macOS < 26.0 | Untested | May work with older system API differences |
 | Linux x86_64 | **Supported** | AF_PACKET capture, `/proc`-based process attribution |
 | Linux aarch64 | Untested | Should work (same AF_PACKET + /proc APIs) |
-| Windows | Not supported | Planned |
+| Windows 10/11 (x86_64) | **Supported** | Raw socket capture (requires Administrator); process attribution via GetExtendedTcp/UdpTable |
 
 ## Roadmap
 
@@ -124,7 +124,7 @@ Priorities for future development:
 2. ~~**Privilege model** — Reduce the need for full root access; capabilities on Linux, BPF device group permissions on macOS~~ (done — see [Running without sudo](#running-without-sudo))
 3. ~~**eBPF capture mode (Phase 1)** — Optional `--capture-mode=ebpf` infrastructure with kernel detection, stub backend, and auto-fallback~~ (done in v0.5.0)
 4. **eBPF capture mode (Phase 2)** — Full eBPF kprobe implementation for per-packet PID attribution
-5. **Windows support** — via Npcap / WinAPI
+5. ~~**Windows support** — via Npcap / WinAPI~~ (done in v0.6.0 — raw socket capture; see [docs/netoproc-windows-compat.md](docs/netoproc-windows-compat.md))
 6. **UI improvements** — Richer TUI views, per-connection sparklines, configurable layouts, and theme support
 
 ## Development
