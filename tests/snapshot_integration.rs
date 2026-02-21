@@ -3,6 +3,11 @@
 //! These tests exercise the full `netoproc --duration N` binary end-to-end.
 //! Most require root privileges (BPF device access).
 //! Run with: `sudo cargo test --test snapshot_integration`
+//!
+//! Windows is excluded: the tests use `libc::getuid` / `libc::kill` which are
+//! not available on Windows, and Windows raw-socket capture requires a
+//! separate Administrator-level test suite.
+#![cfg(not(target_os = "windows"))]
 
 use std::process::Command;
 use std::time::{Duration, Instant};

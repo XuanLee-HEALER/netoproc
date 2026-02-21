@@ -13,6 +13,10 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Static analysis (macOS, fast)
+  # ---------------------------------------------------------------------------
+
   fmt:
     name: Format (rustfmt)
     runs-on: macos-latest
@@ -34,8 +38,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
 
+  # ---------------------------------------------------------------------------
+  # Unit tests — macOS (stable + beta)
+  # ---------------------------------------------------------------------------
+
   test:
-    name: Test (Rust ${{ matrix.toolchain }})
+    name: Unit tests (macOS, Rust ${{ matrix.toolchain }})
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -52,10 +60,107 @@ jobs:
       - name: Run unit tests
         run: cargo test --lib --verbose
 
+  # ---------------------------------------------------------------------------
+  # Integration tests — Linux (ubuntu-latest)
+  #
+  # Runs in two tiers:
+  #   1. Cross-platform library tests — no privileges, run directly.
+  #   2. Kernel-level tests (AF_PACKET, BPF, /proc) — require root, run via
+  #      `sudo`. The `-E` flag preserves PATH/CARGO_HOME so cargo reuses
+  #      the artifacts built in the previous step.
+  # ---------------------------------------------------------------------------
+
+  test-linux:
+    name: Integration tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Build the release binary AND test binaries in one shot.
+      # Subsequent `cargo test` calls reuse these artifacts.
+      - name: Build
+        run: cargo build
+
+      # ---- Tier 1: no privileges required --------------------------------
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Cross-platform integration tests
+        run: |
+          # /proc parser logic (pure Rust, no kernel access)
+          cargo test --test linux_proc_parsing
+          # Windows-compatibility library tests
+          cargo test --test windows_compat
+          cargo test --test windows_integration
+          # Enrichment pipeline (IP annotation, port lookup, reverse DNS)
+          cargo test --test enrichment_integration
+          # eBPF stub tests (Phase 1 — EbpfCapture always returns Err, no root needed)
+          cargo test --test ebpf_integration
+
+      # ---- Tier 2: root required -----------------------------------------
+      #
+      # sudo -E preserves the caller's environment (PATH, CARGO_HOME,
+      # RUSTUP_HOME) so cargo can find its toolchain and reuse the artifacts
+      # already built above without recompiling as root.
+
+      - name: Linux integration tests (AF_PACKET / /proc, root)
+        run: sudo -E env "PATH=$PATH" cargo test --test linux_integration
+
+      - name: Snapshot integration tests (BPF capture, root)
+        # TC-12.x tests generate real network traffic via curl → captive.apple.com.
+        # The ubuntu-latest runner has internet access; curl is pre-installed.
+        run: sudo -E env "PATH=$PATH" cargo test --test snapshot_integration
+
+  # ---------------------------------------------------------------------------
+  # Integration tests — Windows (windows-latest)
+  #
+  # GitHub Actions Windows runners execute as a normal (non-Administrator)
+  # user. Raw-socket capture (SIO_RCVALL) requires Administrator, so the
+  # capture-requiring tests exit gracefully with an expected non-zero code.
+  #
+  # Tests that exercise Windows-specific logic but don't open raw sockets
+  # (packet parsing, byte-order, TCP state mapping, CLI flags) run in full.
+  # ---------------------------------------------------------------------------
+
+  test-windows:
+    name: Integration tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Windows compatibility tests
+        # 59 cross-platform tests covering packet parsing, byte-order,
+        # port annotation, and Windows-specific algorithms.
+        run: cargo test --test windows_compat
+
+      - name: Windows integration tests
+        # Section 1 (TC-WIN-1..12): cross-platform library tests.
+        # Section 2 (TC-WIN-B1..5): binary CLI tests — --help, --version,
+        # invalid args, and capture-mode warnings all work without Administrator.
+        # TC-WIN-B4 (permission error) verifies the correct error exit code
+        # when raw-socket creation fails for a non-admin user.
+        run: cargo test --test windows_integration
+
+  # ---------------------------------------------------------------------------
+  # Release build + artifact upload (macOS)
+  # Runs only after all test jobs pass.
+  # ---------------------------------------------------------------------------
+
   build:
-    name: Build release
+    name: Build release (macOS)
     runs-on: macos-latest
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, test-linux, test-windows]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
