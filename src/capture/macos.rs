@@ -1,16 +1,13 @@
 // macOS capture implementation — wraps BpfCapture from src/bpf/.
 
 use crate::bpf::{BpfCapture, BpfStats};
+use crate::dns::DnsMessage;
 use crate::error::NetopError;
+use crate::packet::PacketSummary;
+
+use super::{CaptureStats, PacketSource};
 
 pub type PlatformCapture = BpfCapture;
-
-/// Statistics from a capture device.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CaptureStats {
-    pub received: u32,
-    pub dropped: u32,
-}
 
 impl From<BpfStats> for CaptureStats {
     fn from(s: BpfStats) -> Self {
@@ -18,6 +15,24 @@ impl From<BpfStats> for CaptureStats {
             received: s.received,
             dropped: s.dropped,
         }
+    }
+}
+
+impl PacketSource for BpfCapture {
+    fn interface(&self) -> &str {
+        BpfCapture::interface(self)
+    }
+
+    fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError> {
+        BpfCapture::read_packets_raw(self, out)
+    }
+
+    fn read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError> {
+        BpfCapture::read_dns_messages(self)
+    }
+
+    fn capture_stats(&self) -> Option<CaptureStats> {
+        self.stats().ok().map(CaptureStats::from)
     }
 }
 
@@ -36,9 +51,4 @@ pub fn open_capture_devices(
     _capture_mode: crate::cli::CaptureMode,
 ) -> Result<(Vec<PlatformCapture>, Option<PlatformCapture>), NetopError> {
     crate::privilege::open_bpf_devices(interfaces, buffer_size, dns_enabled)
-}
-
-/// Get capture statistics (macOS BPF kernel stats).
-pub fn capture_stats(cap: &PlatformCapture) -> Option<CaptureStats> {
-    cap.stats().ok().map(CaptureStats::from)
 }

@@ -21,7 +21,7 @@ use crate::dns::DnsMessage;
 use crate::error::NetopError;
 use crate::packet::{self, PacketSummary};
 
-use super::FilterKind;
+use super::{CaptureStats, FilterKind, PacketSource};
 
 // ---------------------------------------------------------------------------
 // WSA initialization (one-time global)
@@ -75,11 +75,23 @@ unsafe impl Send for RawSocketCapture {}
 
 pub type PlatformCapture = RawSocketCapture;
 
-/// Statistics from a capture device (Windows — limited stats available).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CaptureStats {
-    pub received: u32,
-    pub dropped: u32,
+impl PacketSource for RawSocketCapture {
+    fn interface(&self) -> &str {
+        RawSocketCapture::interface(self)
+    }
+
+    fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError> {
+        RawSocketCapture::read_packets_raw(self, out)
+    }
+
+    fn read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError> {
+        RawSocketCapture::read_dns_messages(self)
+    }
+
+    fn capture_stats(&self) -> Option<CaptureStats> {
+        // Windows raw sockets do not expose kernel-level drop counters.
+        None
+    }
 }
 
 impl RawSocketCapture {
@@ -554,11 +566,6 @@ pub fn open_capture_devices(
     };
 
     Ok((captures, dns_capture))
-}
-
-/// Get capture statistics (Windows — no kernel-level stats available).
-pub fn capture_stats(_cap: &PlatformCapture) -> Option<CaptureStats> {
-    None
 }
 
 // ---------------------------------------------------------------------------

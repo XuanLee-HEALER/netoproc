@@ -9,7 +9,7 @@ use crate::dns::DnsMessage;
 use crate::error::NetopError;
 use crate::packet::{self, PacketSummary};
 
-use super::FilterKind;
+use super::{CaptureStats, FilterKind, PacketSource};
 
 // ---------------------------------------------------------------------------
 // AF_PACKET constants
@@ -66,11 +66,23 @@ pub struct AfPacketCapture {
 
 pub type PlatformCapture = AfPacketCapture;
 
-/// Statistics from a capture device (Linux — no kernel-level stats like macOS BPF).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CaptureStats {
-    pub received: u32,
-    pub dropped: u32,
+impl PacketSource for AfPacketCapture {
+    fn interface(&self) -> &str {
+        AfPacketCapture::interface(self)
+    }
+
+    fn read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError> {
+        AfPacketCapture::read_packets_raw(self, out)
+    }
+
+    fn read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError> {
+        AfPacketCapture::read_dns_messages(self)
+    }
+
+    fn capture_stats(&self) -> Option<CaptureStats> {
+        // Linux AF_PACKET does not expose kernel-level drop counters.
+        None
+    }
 }
 
 impl AfPacketCapture {
@@ -516,11 +528,6 @@ fn try_open_ebpf(
     Err(NetopError::EbpfProgram(
         "eBPF capture device construction not yet implemented".to_string(),
     ))
-}
-
-/// Get capture statistics (Linux has no kernel-level BPF stats).
-pub fn capture_stats(_cap: &PlatformCapture) -> Option<CaptureStats> {
-    None
 }
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use clap::Parser;
 use crossbeam_channel::{Receiver, Sender, bounded, select};
 
-use netoproc::capture::{self, PlatformCapture};
+use netoproc::capture::{self, PacketSource};
 use netoproc::cli::Cli;
 use netoproc::dns::DnsMessage;
 use netoproc::enrichment;
@@ -211,7 +211,7 @@ fn run(cli: Cli) -> Result<(), NetopError> {
     let refresh_handle = thread::Builder::new()
         .name("netoproc-refresh".into())
         .spawn(move || {
-            process_refresh_loop(&pt_for_refresh);
+            process_refresh_loop(&pt_for_refresh, build_process_table);
         })
         .map_err(|e| NetopError::Fatal(format!("spawn refresh thread: {e}")))?;
 
@@ -638,8 +638,11 @@ fn monitor_stats_loop(
 ///
 /// Each read blocks for up to 500ms (configured via read timeout).
 /// Packets in each batch have their `direction` field set based on local IPs.
-fn capture_loop(
-    cap: &mut PlatformCapture,
+///
+/// Generic over `S: PacketSource` so the production concrete type is
+/// monomorphized (zero overhead) and tests can inject a mock.
+fn capture_loop<S: PacketSource>(
+    cap: &mut S,
     tx: &mpsc::SyncSender<Vec<PacketSummary>>,
     local_ips: &HashSet<IpAddr>,
 ) {
@@ -721,7 +724,7 @@ fn capture_loop(
     }
 
     // Log capture stats for this device before exiting.
-    if let Some(st) = capture::capture_stats(cap) {
+    if let Some(st) = cap.capture_stats() {
         log::info!(
             "capture {} exit: eagain={}, empty_ok={}, data_reads={} (parse_empty={}), packets={}, kernel_recv={}, kernel_drop={}",
             iface,
@@ -756,7 +759,9 @@ fn capture_loop(
 /// mode, nobody reads from `dns_rx`, so the bounded channel fills up. A
 /// blocking `send` would block forever, preventing the thread from exiting
 /// when `SHUTDOWN_REQUESTED` is set.
-fn dns_capture_loop(cap: &mut PlatformCapture, tx: &Sender<DnsMessage>) {
+///
+/// Generic over `S: PacketSource` — same rationale as `capture_loop`.
+fn dns_capture_loop<S: PacketSource>(cap: &mut S, tx: &Sender<DnsMessage>) {
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             return;
@@ -793,7 +798,14 @@ fn dns_capture_loop(cap: &mut PlatformCapture, tx: &Sender<DnsMessage>) {
 // ---------------------------------------------------------------------------
 
 /// Process refresh thread: rebuilds the ProcessTable every 500ms.
-fn process_refresh_loop(process_table: &Arc<ArcSwap<ProcessTable>>) {
+///
+/// `build_table` is a callable that produces a fresh `ProcessTable`. In
+/// production this is the platform `build_process_table` function; in tests
+/// a closure can return a pre-built table for deterministic behaviour.
+fn process_refresh_loop<F>(process_table: &Arc<ArcSwap<ProcessTable>>, build_table: F)
+where
+    F: Fn() -> ProcessTable,
+{
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             return;
@@ -802,7 +814,7 @@ fn process_refresh_loop(process_table: &Arc<ArcSwap<ProcessTable>>) {
         if SHUTDOWN_REQUESTED.load(Ordering::Relaxed) {
             return;
         }
-        let new_table = build_process_table();
+        let new_table = build_table();
         process_table.store(Arc::new(new_table));
     }
 }
