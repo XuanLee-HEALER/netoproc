@@ -737,7 +737,7 @@ fn tc_w_7_5_truncated_returns_none() {
 fn tc_w_8_1_bounds_check_rejects_overflow() {
     // Simulate a table buffer where dwNumEntries claims more rows than fit.
     // dwNumEntries = 1000, but buffer is only 16 bytes.
-    let mut buffer = vec![0u8; 16];
+    let mut buffer = [0u8; 16];
     let count: u32 = 1000;
     buffer[0..4].copy_from_slice(&count.to_ne_bytes());
 
@@ -769,7 +769,7 @@ fn tc_w_8_2_bounds_check_accepts_valid() {
 
 #[test]
 fn tc_w_8_3_bounds_check_zero_entries() {
-    let mut buffer = vec![0u8; 4];
+    let mut buffer = [0u8; 4];
     buffer[0..4].copy_from_slice(&0u32.to_ne_bytes());
 
     let entries = u32::from_ne_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;

@@ -314,8 +314,8 @@ fn tc_win_8_port_byte_order() {
     assert_eq!(win_port(0x0100), 1, "port 1");
 
     // Roundtrip: all common ports
-    for port in [22, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 8080, 27017] {
-        let dw = (port as u16).to_be() as u32;
+    for port in [22u16, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 8080, 27017] {
+        let dw = port.to_be() as u32;
         assert_eq!(win_port(dw), port, "roundtrip failed for port {port}");
     }
 }
@@ -439,7 +439,7 @@ fn tc_win_10_table_bounds_validation() {
     assert!(valid_fits, "should accept: 3 entries fit exactly");
 
     // Zero entries always fits
-    let zero_fits = header_size + 0 * row_size <= buffer_len;
+    let zero_fits = header_size <= buffer_len; // 0 rows: only header overhead
     assert!(zero_fits, "should accept: zero entries");
 }
 

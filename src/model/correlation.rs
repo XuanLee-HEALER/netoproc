@@ -518,7 +518,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     // TCP state constants differ between platforms.
-    // macOS uses BSD TCPS_* values; Linux uses /proc/net/tcp hex values.
+    // macOS uses BSD TCPS_* values; Linux uses /proc/net/tcp hex values;
+    // Windows uses MIB_TCP_STATE values.
     #[cfg(target_os = "macos")]
     const TCP_STATE_LISTEN: i32 = 1;
     #[cfg(target_os = "macos")]
@@ -528,6 +529,11 @@ mod tests {
     const TCP_STATE_LISTEN: i32 = 0x0A;
     #[cfg(target_os = "linux")]
     const TCP_STATE_ESTABLISHED: i32 = 0x01;
+
+    #[cfg(target_os = "windows")]
+    const TCP_STATE_LISTEN: i32 = 2; // MIB_TCP_STATE_LISTEN
+    #[cfg(target_os = "windows")]
+    const TCP_STATE_ESTABLISHED: i32 = 5; // MIB_TCP_STATE_ESTAB
 
     fn make_raw_process(pid: u32, name: &str, sockets: Vec<RawSocket>) -> RawProcess {
         RawProcess {
@@ -762,7 +768,7 @@ mod tests {
             ifi_opackets: 5,
             ifi_ierrors: 0,
             ifi_oerrors: 0,
-            flags: libc::IFF_UP as u32,
+            flags: 0x1, // IFF_UP (POSIX: 0x1; not available in libc on Windows)
         };
 
         let state = correlate(
