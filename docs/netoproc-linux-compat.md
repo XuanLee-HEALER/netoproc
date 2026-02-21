@@ -19,6 +19,7 @@
 | 进程归属（ProcessTable） | `libproc` | `/proc/net/tcp` + `/proc/<pid>/fd/` |
 
 其余所有代码**不需要改动**，包括：
+
 - `PacketSummary` 数据结构
 - `SocketKey` 规范化 key
 - `TrafficStats` 统计聚合
@@ -28,7 +29,7 @@
 
 ### 1.2 实际目录结构（v0.4.0 实现）
 
-```
+```text
 src/
 ├── capture/
 │   ├── mod.rs        ← cfg 路由 + FilterKind enum
@@ -90,6 +91,7 @@ pub enum FilterKind { Traffic, Dns }
 ```
 
 两套平台模块导出相同的公开 API：
+
 - `pub type PlatformCapture = ...;`
 - `pub struct CaptureStats { ... }`
 - `pub fn check_capture_access() -> Result<(), NetopError>`
@@ -356,7 +358,7 @@ main.rs 直接调用 `netoproc::process::build_process_table()`，无需泛型�
 
 Linux 没有 libproc，进程和 socket 的关联需要两步：
 
-```
+```text
 /proc/net/tcp  →  inode → socket 映射
 /proc/net/tcp6 →  inode → socket 映射（IPv6）
 /proc/net/udp  →  inode → socket 映射
@@ -404,12 +406,13 @@ impl ProcessTable for ProcFsTable {
 
 文件格式（每行一个连接）：
 
-```
+```text
   sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   101        0  21234 ...
 ```
 
 关键字段：
+
 - `local_address`：`hex_ip:hex_port`，**小端序**（需要字节反转）
 - `rem_address`：同上
 - `inode`：第10列（0-indexed），直接用于关联 pid
@@ -465,7 +468,7 @@ fn parse_hex_addr_v6(s: &str) -> Option<Ipv6Addr> {
 }
 ```
 
-**坑2：/proc/<pid>/fd 需要权限**
+**坑2：/proc/`<pid>`/fd 需要权限**
 
 遍历 `/proc/<pid>/fd/` 需要对应进程的权限或 root。普通用户只能读取自己进程的 fd 目录，其他进程会返回 `EACCES`。
 
@@ -617,7 +620,7 @@ Linux 方案同样是**一次安装，永久生效，运行时零开销**，用�
 
 ### 7.2 所需 capabilities 说明
 
-```
+```text
 cap_net_raw    → 允许创建 AF_PACKET socket（抓包必须）
 cap_net_admin  → 允许设置混杂模式（PACKET_ADD_MEMBERSHIP）
 cap_sys_ptrace → 允许读取其他进程的 /proc/<pid>/fd/（进程归因必须）
@@ -626,7 +629,7 @@ cap_sys_ptrace → 允许读取其他进程的 /proc/<pid>/fd/（进程归因必
 
 权限分级说明（在 README 中体现）：
 
-```
+```text
 基本模式（cap_net_raw + cap_net_admin）：
   能抓包，只能归因当前用户自己的进程
 

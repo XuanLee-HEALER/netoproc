@@ -199,7 +199,7 @@ Rationale:
 
 #### Recommended Architecture
 
-```
+```text
 ┌───────────────────────────────────────────────────────┐
 │                  netoproc CLI                          │
 │  --capture-mode=auto|ebpf|afpacket                    │
@@ -222,31 +222,37 @@ Rationale:
 ```
 
 **Default behavior (`--capture-mode=auto`)**:
+
 1. Detect kernel version >= 5.8 and BTF available → use eBPF
 2. Otherwise → fall back to AF_PACKET
 
 **DNS handling**:
+
 - In eBPF mode, DNS capture can still use AF_PACKET socket filter (port 53 only)
 - Or attach an eBPF socket filter to DNS traffic
 
 ### 5.2 Implementation Roadmap
 
 #### Phase 1: Basic eBPF kprobe mode
+
 - Introduce `aya` + `aya-ebpf` dependencies
 - Write kprobe eBPF program hooking `tcp_sendmsg`/`tcp_recvmsg`
 - Userspace reads PID → traffic statistics via BPF map
 - `--capture-mode=ebpf` CLI option
 
 #### Phase 2: UDP support + DNS
+
 - Add `udp_sendmsg`/`udp_recvmsg` kprobes
 - DNS parsing solution (AF_PACKET fallback or eBPF socket filter)
 
 #### Phase 3: Auto mode + fallback
+
 - Kernel version / BTF detection
 - `--capture-mode=auto` as default
 - Graceful fallback to AF_PACKET on eBPF load failure
 
 #### Phase 4: Advanced features
+
 - cgroup awareness (container traffic attribution)
 - Ring buffer replacing perf buffer (kernel 5.8+)
 - Optional XDP fast path

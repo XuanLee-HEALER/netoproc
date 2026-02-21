@@ -8,7 +8,7 @@
 
 netoproc 通过 BPF（Berkeley Packet Filter）抓取网络数据包，macOS 上 BPF 设备文件位于 `/dev/bpf0`、`/dev/bpf1`……默认权限为：
 
-```
+```text
 crw-------  root  wheel  /dev/bpf*
 ```
 
@@ -24,7 +24,7 @@ crw-------  root  wheel  /dev/bpf*
 
 权限变更后 bpf 设备的状态：
 
-```
+```text
 crw-rw----  root  access_bpf  /dev/bpf*
 ```
 
@@ -88,7 +88,7 @@ crw-rw----  root  access_bpf  /dev/bpf*
 
 系统启动时的执行链：
 
-```
+```text
 系统内核启动
     ↓
 launchd 启动，加载 /Library/LaunchDaemons/ 下所有 plist
@@ -362,7 +362,7 @@ launchd plist 设置了 `RunAtLoad`，系统每次重启时会重新执行权限
 
 macOS 上进程信息通过 `libproc` 的两个调用获取：
 
-```
+```text
 proc_listpids(PROC_ALL_PIDS)     → 列出所有 PID（普通用户可以调用）
 proc_pidinfo(PROC_PIDLISTFDS)    → 获取指定进程的 fd 列表
 ```
@@ -395,7 +395,7 @@ proc_pidinfo(PROC_PIDLISTFDS)    → 获取指定进程的 fd 列表
 
 Linux 上不存在这个限制。`cap_sys_ptrace` capability 允许读取任意进程的 `/proc/<pid>/fd/`，包括 root 进程和其他用户的进程。授予该 capability 后，Linux 版本的进程归因能力与 `sudo` 运行完全一致。
 
-```
+```text
 macOS（普通用户）→ 只能归因当前用户的进程
 Linux（cap_sys_ptrace）→ 能归因系统所有进程
 ```

@@ -79,12 +79,14 @@ connectivity or performance issues on macOS.
 **FR-1.1**: Enumerate all processes on the system that hold open network sockets.
 
 **FR-1.2**: For each process, report:
+
 - PID (process ID)
 - Process name (short name, e.g., "curl")
 - Full command line (argv)
 - Owning user (UID resolved to username)
 
 **FR-1.3**: For each process, list all network socket file descriptors with:
+
 - fd number
 - Protocol: TCP, UDP, or ICMP
 - Local address and port (in `addr:port` format; `*` for wildcard/unbound)
@@ -95,6 +97,7 @@ connectivity or performance issues on macOS.
   - ICMP: OPEN
 
 **FR-1.4**: Data source for process and fd enumeration:
+
 - `proc_listpids(PROC_ALL_PIDS)` to obtain PID list.
 - `proc_pidinfo(pid, PROC_PIDLISTFDS)` to obtain fd list per process.
 - `proc_pidfdinfo(pid, fd, PROC_PIDFDSOCKETINFO)` to obtain socket details.
@@ -108,6 +111,7 @@ directly available from libproc (e.g., TCP state, interface binding).
 
 **FR-2.1**: For each active connection (ESTABLISHED TCP, or active UDP flow),
 report:
+
 - Remote address and port
 - Direction:
   - **Inbound**: the local port matches a socket in LISTEN state owned by the
@@ -118,6 +122,7 @@ report:
   from kernel connection table).
 
 **FR-2.2**: Traffic rates at three granularities:
+
 - **100ms buckets**: internal computation granularity (not displayed directly).
 - **Per-second (1s)**: default display granularity in TUI; default snapshot
   granularity.
@@ -131,6 +136,7 @@ monitoring (not since the connection was established — netop cannot know traff
 that occurred before it started).
 
 **FR-2.4**: Connection stability metrics (TCP only):
+
 - **RTT** (smoothed, microseconds): obtained from `TCP_CONNECTION_INFO` via
   `getsockopt`, or inferred from kernel `xtcpcb_n` fields, or estimated from
   BPF-observed SYN/SYN-ACK timing for new connections during monitoring.
@@ -152,6 +158,7 @@ use `xtcpcb_n` kernel struct fields or BPF-based RTT estimation.
 ### FR-3: Interface Statistics
 
 **FR-3.1**: List all network interfaces with:
+
 - Interface name (e.g., `en0`, `lo0`, `utun3`)
 - IPv4 address(es)
 - IPv6 address(es)
@@ -163,6 +170,7 @@ use `xtcpcb_n` kernel struct fields or BPF-based RTT estimation.
 - Interface status: up/down, link speed (if available)
 
 **FR-3.2**: Data source for interface statistics:
+
 - `getifaddrs()` iterating linked list:
   - `AF_LINK` entries: cast `ifa_data` to `struct if_data` for traffic counters
     (`ifi_ibytes`, `ifi_obytes`, `ifi_ipackets`, `ifi_opackets`, `ifi_ierrors`,
@@ -172,6 +180,7 @@ use `xtcpcb_n` kernel struct fields or BPF-based RTT estimation.
 - Rates computed by diffing consecutive samples divided by elapsed time.
 
 **FR-3.3**: DNS server configuration per interface:
+
 - Data source: `SCDynamicStoreCreate` + `SCDynamicStoreCopyValue` with key
   `"State:/Network/Service/<ServiceID>/DNS"` and global key
   `"State:/Network/Global/DNS"`.
@@ -181,6 +190,7 @@ use `xtcpcb_n` kernel struct fields or BPF-based RTT estimation.
 
 **FR-4.1**: Resolver inventory: for each network interface with configured DNS
 servers, compute and report:
+
 - DNS server address
 - Associated interface name
 - Average query latency (milliseconds, computed from observed query/response pairs)
@@ -188,10 +198,12 @@ servers, compute and report:
 - Total query count observed
 
 **FR-4.2**: Live DNS query monitoring:
+
 - Capture all UDP and TCP traffic on port 53 via BPF filter.
 - Parse DNS wire format (RFC 1035) for both queries and responses.
 
 **FR-4.3**: DNS wire format parsing requirements:
+
 - Parse DNS header (12 bytes): transaction ID, flags (QR, OPCODE, RCODE),
   question count, answer count, authority count, additional count.
 - Parse question section: QNAME (with label compression per RFC 1035 Section
@@ -202,6 +214,7 @@ servers, compute and report:
   from malicious packets.
 
 **FR-4.4**: For each observed DNS query, record:
+
 - Timestamp (monotonic clock, millisecond precision)
 - Originating process (matched via source port to socket owner, see FR-4.5)
 - Query name (e.g., `example.com`)
@@ -211,6 +224,7 @@ servers, compute and report:
 - Resolver used: destination IP address of the query packet
 
 **FR-4.5**: DNS-to-process attribution:
+
 - Match the ephemeral source port of the DNS query packet to an open UDP or TCP
   socket owned by a process (from FR-1 data).
 - If the socket has been closed by the time the correlation is attempted, record
@@ -226,6 +240,7 @@ traffic data for the specified duration, emit to stdout, then exit.
 **FR-5.3**: Alternative output format: JSON (selected via `--format json`).
 
 **FR-5.4**: Output constraints:
+
 - No ANSI escape codes.
 - No progress indicators, spinners, or interactive prompts.
 - No output to stderr except error messages.
@@ -233,7 +248,7 @@ traffic data for the specified duration, emit to stdout, then exit.
 
 **FR-5.5**: TSV schema — a single per-process traffic table:
 
-```
+```text
 Columns: pid, process, rx_bytes, tx_bytes, rx_packets, tx_packets
 ```
 
@@ -285,6 +300,7 @@ elements. Displayed in Connection View (per-connection rate) and Interface
 View (per-interface rate). One character per sample.
 
 **FR-6.7**: Color scheme:
+
 - Rate-based heat coloring with configurable thresholds:
   - Green: low traffic
   - Yellow: moderate traffic
@@ -364,13 +380,14 @@ system libraries.
 1 second.
 
 **NFR-4.3**: Clear, actionable error messages for common failure modes:
+
 - Not running as root
 - No BPF devices available
 - Insufficient terminal size
 
 ## 6. CLI Interface Specification
 
-```
+```text
 USAGE:
     sudo netoproc [OPTIONS]
 
@@ -416,7 +433,7 @@ OPTIONS:
 The canonical data model. All field names are authoritative and must be used
 consistently across TSV column headers, JSON field names, and Rust struct fields.
 
-```
+```text
 SystemNetworkState
 ├── timestamp: u64              // Unix timestamp in milliseconds
 ├── interfaces: Vec<Interface>
@@ -544,7 +561,7 @@ the exit code.
 
 ## 10. Constraints and Exclusions
 
-### Explicitly NOT supported:
+### Explicitly NOT supported
 
 - Linux, Windows, or any non-macOS operating system.
 - Running without root/sudo privileges.
@@ -556,7 +573,7 @@ the exit code.
 - Configuration files (all configuration via CLI flags).
 - IPv6-only systems with no IPv4 stack (IPv6 is supported alongside IPv4).
 
-### Explicitly NOT in scope for initial version:
+### Explicitly NOT in scope for initial version
 
 - Container/cgroup awareness (may be added later).
 - GeoIP or ASN lookup for remote addresses.

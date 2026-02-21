@@ -1,0 +1,18 @@
+globs:
+  - "**/*.md"
+ignores:
+  - "target/**"
+config:
+  # Line length: disabled — technical docs with tables and long inline code
+  # cannot be meaningfully constrained to 80 characters
+  MD013: false
+  # Duplicate headings: allow the same heading text under different parent
+  # sections (required by CHANGELOG which has "Added"/"Changed" per version)
+  MD024:
+    siblings_only: true
+  # Bold/italic used as section labels: disabled — intentional style in
+  # Chinese technical documentation ("坑1：...", "Top: ...", etc.)
+  MD036: false
+  # Table column style: disabled — mixed separator style (spacious content
+  # rows with compact "---" separator rows) is universally accepted Markdown
+  MD060: false

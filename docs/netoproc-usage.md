@@ -6,7 +6,7 @@ netop — real-time per-process network traffic monitor for macOS
 
 ## SYNOPSIS
 
-```
+```bash
 sudo netoproc [OPTIONS]
 ```
 
@@ -25,6 +25,7 @@ them with process and socket information from macOS system APIs to produce a
 unified view.
 
 Unlike `nettop` (Apple's built-in), netop provides:
+
 - Per-connection traffic rates (not just per-process aggregates)
 - A dedicated DNS observatory (query log, resolver performance)
 - A pipe-friendly snapshot mode for scripting
@@ -42,7 +43,7 @@ the packet contents.
 Launch the interactive full-screen TUI. This is the default behavior when
 `--duration` is not specified.
 
-```
+```bash
 sudo netoproc
 sudo netoproc --monitor
 ```
@@ -56,7 +57,7 @@ Capture per-process traffic data for a specified duration and print it to
 stdout, then exit. Triggered by the `--duration` flag. Designed for scripting,
 logging, and piping to other Unix tools.
 
-```
+```bash
 sudo netoproc --duration 5
 sudo netoproc --duration 5 --format json
 sudo netoproc --duration 5 --format pretty
@@ -69,7 +70,7 @@ text processing tools.
 
 ## OPTIONS
 
-```
+```text
 --duration <SECONDS>
     Snapshot mode: collect per-process traffic for the specified
     duration, then output and exit.
@@ -128,13 +129,13 @@ text processing tools.
 
 netop **requires root privileges**. Always run with `sudo`:
 
-```
+```bash
 sudo netop
 ```
 
 Running without sudo produces an error and exits immediately:
 
-```
+```bash
 $ netop
 error: netop requires root privileges. Run with: sudo netop
 ```
@@ -175,6 +176,7 @@ error: netop requires root privileges. Run with: sudo netop
 ### Status Bar
 
 The bottom of the screen shows:
+
 - Current view name
 - Active filter (if any)
 - Sort column and direction
@@ -188,7 +190,7 @@ The bottom of the screen shows:
 The default view. Shows a table of all processes with open network sockets,
 sorted by aggregate traffic rate.
 
-```
+```text
  PID   Process    User     Sockets  Conns   RX Rate     TX Rate     RX Total    TX Total
  1842  firefox    admin    12       8       ▂▃▅▇ 2.1M   ▁▁▂▃ 340K  128.5 MB    12.3 MB
  2103  curl       admin    1        1       ▇▅▃▁ 512K   ▁▁▁▁  12K  5.2 MB      102 KB
@@ -196,6 +198,7 @@ sorted by aggregate traffic rate.
 ```
 
 **Columns:**
+
 - `PID`: Process ID
 - `Process`: Short process name
 - `User`: Owning username
@@ -209,7 +212,7 @@ sorted by aggregate traffic rate.
 **Expandable rows**: Press `Enter` on a process to expand it and see its
 individual sockets and connections:
 
-```
+```text
  1842  firefox    admin    12       8       ▂▃▅▇ 2.1M   ▁▁▂▃ 340K  128.5 MB    12.3 MB
    ├─ fd=5  TCP  192.168.1.100:54321 → 140.82.121.4:443    ESTABLISHED  en0  ↓1.2M ↑200K
    ├─ fd=6  TCP  192.168.1.100:54322 → 151.101.1.69:443    ESTABLISHED  en0  ↓800K ↑140K
@@ -222,7 +225,7 @@ individual sockets and connections:
 A flat table of all active connections across all processes, with detailed
 traffic metrics.
 
-```
+```text
  Process   Local               Remote              Proto  State        Dir   Iface  RX Rate   TX Rate   RTT      Retrans
  firefox   192.168.1.100:54321 140.82.121.4:443    TCP    ESTABLISHED  Out   en0    1.2 MB/s  200 KB/s  12ms     0
  node      *:3000              10.0.0.5:49201      TCP    ESTABLISHED  In    en0    50 KB/s   1.5 MB/s  0.5ms    2
@@ -231,6 +234,7 @@ traffic metrics.
 ```
 
 **Columns:**
+
 - `Process`: Process name (with PID on hover or expansion)
 - `Local`: Local address:port
 - `Remote`: Remote address:port
@@ -244,6 +248,7 @@ traffic metrics.
 - `Retrans`: Retransmission count (TCP only)
 
 **Color coding** (default thresholds):
+
 - Green: < 1 KB/s
 - Yellow: 1 KB/s – 100 KB/s
 - Red: > 100 KB/s
@@ -252,7 +257,7 @@ traffic metrics.
 
 Card layout showing one card per network interface.
 
-```
+```text
 ┌─ en0 (Wi-Fi) ─────────────────── UP ──────────────────────────────────┐
 │  IPv4: 192.168.1.100                                                  │
 │  IPv6: fe80::1a2b:3c4d:5e6f:7890                                     │
@@ -285,7 +290,8 @@ represents relative traffic volume within the visible range.
 Split layout with resolver statistics at the top and a live query log at the bottom.
 
 **Top: Resolver Statistics**
-```
+
+```text
  Interface  Server         Avg Latency  Fail Rate  Queries
  en0        192.168.1.1    12.3 ms      0.5%       1,234
  en0        8.8.8.8        18.7 ms      0.1%       567
@@ -293,7 +299,8 @@ Split layout with resolver statistics at the top and a live query log at the bot
 ```
 
 **Bottom: Live Query Log**
-```
+
+```text
  Time      Process   Query                    Type  Response            Latency  Resolver
  12:00:01  firefox   github.com               A     140.82.121.4        12ms     192.168.1.1
  12:00:01  firefox   api.github.com           AAAA  2606:50c0:8003::154 15ms     192.168.1.1
@@ -304,6 +311,7 @@ Split layout with resolver statistics at the top and a live query log at the bot
 ```
 
 **Query log columns:**
+
 - `Time`: Wall-clock timestamp (HH:MM:SS)
 - `Process`: Process that made the query (or "unknown" if attribution failed)
 - `Query`: Domain name queried
@@ -319,11 +327,11 @@ Split layout with resolver statistics at the top and a live query log at the bot
 A per-process traffic table with a header row and data rows sorted by total
 traffic (rx_bytes + tx_bytes) descending.
 
-```
-pid	process	rx_bytes	tx_bytes	rx_packets	tx_packets
-1842	chrome	1200000	340000	800	200
-5678	curl	50000	10000	100	50
--	unknown	45000	0	30	0
+```text
+pid process rx_bytes tx_bytes rx_packets tx_packets
+1842 chrome 1200000 340000 800 200
+5678 curl 50000 10000 100 50
+- unknown 45000 0 30 0
 ```
 
 - Columns are tab-separated
@@ -377,7 +385,7 @@ A JSON array of per-process traffic objects sorted by total traffic descending.
 
 Human-readable table with formatted byte sizes and a summary line.
 
-```
+```text
 Per-Process Network Traffic
 ==============================================================================
 PID      PROCESS                       RX           TX     RX_PKT     TX_PKT
@@ -513,7 +521,7 @@ bandwidth conventions.
 
 Sparklines use Unicode block elements to represent data visually:
 
-```
+```text
 Characters: ▁ ▂ ▃ ▄ ▅ ▆ ▇ █
              (low)       (high)
 ```
@@ -544,7 +552,7 @@ window (auto-scaled), not an absolute scale.
 
 | Variable | Effect |
 |----------|--------|
-| `NO_COLOR` | If set to any value, disables all colored output. Equivalent to `--no-color`. See https://no-color.org/ |
+| `NO_COLOR` | If set to any value, disables all colored output. Equivalent to `--no-color`. See <https://no-color.org/> |
 | `RUST_LOG` | Set to `debug` or `trace` for diagnostic logging to stderr. For development/debugging only. Example: `RUST_LOG=debug sudo netop` |
 
 ## FILES

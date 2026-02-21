@@ -21,13 +21,14 @@ Modules requiring new Windows implementations:
 | Packet capture | BPF `/dev/bpf*` | AF_PACKET socket | Raw socket + SIO_RCVALL |
 | Process attribution | libproc | /proc/net/tcp + /proc/fd | GetExtendedTcpTable/UdpTable |
 | Connection state | sysctl pcblist_n | /proc/net/tcp[6] | GetExtendedTcpTable |
-| Process enumeration | libproc (proc_listpids) | /proc/<pid>/stat | CreateToolhelp32Snapshot |
+| Process enumeration | libproc (proc_listpids) | /proc/`<pid>`/stat | CreateToolhelp32Snapshot |
 | Interface info | getifaddrs + AF_LINK | getifaddrs + AF_PACKET | GetAdaptersAddresses |
 | DNS configuration | SystemConfiguration | /etc/resolv.conf | GetAdaptersAddresses DNS fields |
 | Privilege check | getuid + /dev/bpf0 access | getuid + AF_PACKET test | IsUserAnAdmin / raw socket test |
 | Signal handling | signal(SIGTERM/SIGINT) | signal(SIGTERM/SIGINT) | SetConsoleCtrlHandler |
 
 Code not requiring changes (~95%):
+
 - `PacketSummary` / `SocketKey` / `TrafficStats` data structures
 - Shared IP/TCP/UDP/DNS packet parsing (packet.rs, dns.rs)
 - Channel model and three-thread architecture
@@ -37,7 +38,7 @@ Code not requiring changes (~95%):
 
 ### 1.2 Directory Structure Changes
 
-```
+```text
 src/
 ├── capture/
 │   ├── mod.rs          ← add #[cfg(target_os = "windows")] routing
@@ -94,7 +95,7 @@ cargo check  # current platform
 
 Windows has neither BPF nor AF_PACKET. Uses Winsock2 raw sockets:
 
-```
+```text
 socket(AF_INET, SOCK_RAW, IPPROTO_IP)
 → bind(interface_ip)
 → WSAIoctl(SIO_RCVALL, RCVALL_ON)  // receive all IP packets
@@ -102,12 +103,14 @@ socket(AF_INET, SOCK_RAW, IPPROTO_IP)
 ```
 
 **Key differences**:
+
 - Receives raw IP packets (no Ethernet header), parsed via `packet::parse_raw_frame()`
 - Each socket binds to an interface IP (not interface name)
 - Requires Administrator privileges
 - IPv4 and IPv6 need separate AF_INET/AF_INET6 sockets
 
 **Filtering strategy**:
+
 - macOS/Linux use hardware BPF filters at the kernel level
 - Windows performs software filtering in userspace (slightly lower performance, acceptable for a monitoring tool)
 - Traffic capture: keep only TCP/UDP/ICMP packets
@@ -124,6 +127,7 @@ pub fn capture_stats(cap: &PlatformCapture) -> Option<CaptureStats>
 ```
 
 PlatformCapture methods:
+
 - `read_packets_raw(&mut self, out: &mut Vec<PacketSummary>) -> Result<usize, NetopError>`
 - `read_dns_messages(&mut self) -> Result<Vec<DnsMessage>, NetopError>`
 - `interface(&self) -> &str`
@@ -143,7 +147,7 @@ PlatformCapture methods:
 
 Windows provides more direct socket-to-PID mapping than Linux/macOS:
 
-```
+```text
 GetExtendedTcpTable(TCP_TABLE_OWNER_PID_ALL)
   → MIB_TCPTABLE_OWNER_PID → each row contains (local_addr, local_port, remote_addr, remote_port, state, owning_pid)
 
@@ -158,7 +162,8 @@ Process names are obtained via `CreateToolhelp32Snapshot` + `Process32FirstW/Nex
 ### 3.2 TCP State Mapping
 
 Windows MIB_TCP_STATE enum values:
-```
+
+```text
 1=CLOSED, 2=LISTEN, 3=SYN_SENT, 4=SYN_RCVD,
 5=ESTAB, 6=FIN_WAIT1, 7=FIN_WAIT2, 8=CLOSE_WAIT,
 9=CLOSING, 10=LAST_ACK, 11=TIME_WAIT, 12=DELETE_TCB
@@ -171,6 +176,7 @@ Windows MIB_TCP_STATE enum values:
 ### 4.1 system/interface.rs
 
 Uses `GetAdaptersAddresses(AF_UNSPEC)` instead of `getifaddrs`:
+
 - Returns `IP_ADAPTER_ADDRESSES` linked list
 - Contains IPv4/IPv6 addresses, DNS servers, interface status
 - Interface statistics via `GetIfEntry2` (byte/packet counters)

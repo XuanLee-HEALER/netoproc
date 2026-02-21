@@ -27,7 +27,7 @@
 
 ### 2.1 Runtime Mode Selection
 
-```
+```text
 CLI: --capture-mode=auto (default on Linux)
          |
          v
@@ -50,7 +50,7 @@ CLI: --capture-mode=auto (default on Linux)
 
 ### 2.2 eBPF Mode Thread Model
 
-```
+```text
 +--------------------------------------------------------+
 |  Main Thread (Stats + TUI)                             |
 |  - Reads per-PID traffic stats from BPF maps           |
@@ -101,6 +101,7 @@ kprobes are attached to the following kernel functions:
 | `udp_recvmsg` | kretprobe | PID, sock 5-tuple, return value | UDP inbound bytes |
 
 **Why kprobe instead of tracepoint**:
+
 - `tcp_sendmsg`/`tcp_recvmsg` do not have stable tracepoints
 - kprobes are available since kernel 4.1+, offering better compatibility
 - While kprobe-attached kernel function signatures may change across versions, these particular functions have extremely stable signatures
@@ -201,7 +202,7 @@ fn tcp_sendmsg_probe(ctx: ProbeContext) -> u32 {
 
 ### 4.1 Module Structure
 
-```
+```text
 src/capture/
 ├── mod.rs          <- CaptureMode enum + conditional module imports
 ├── linux.rs        <- AF_PACKET backend + runtime dispatch logic
@@ -510,7 +511,7 @@ Exit code: maps to 2 (same level as CaptureDevice).
 
 ### 8.2 Fallback Strategy
 
-```
+```text
 auto mode:
   1. Attempt to load eBPF -> success -> use eBPF
   2. Load fails -> log::warn -> fall back to AF_PACKET
@@ -530,6 +531,7 @@ afpacket mode (forced):
 ## 9. Incremental Implementation Plan
 
 ### Phase 1: Scaffolding (current implementation)
+
 - [x] CLI: `--capture-mode` option + `CaptureMode` enum
 - [x] `src/capture/ebpf.rs`: eBPF backend scaffolding (detection + stub implementation)
 - [x] `src/capture/linux.rs`: runtime dispatch (eBPF/AF_PACKET selection integrated directly)
@@ -541,6 +543,7 @@ afpacket mode (forced):
 - [x] Compilation verified: `cargo check` passes
 
 ### Phase 2: eBPF Program Integration (future)
+
 - [ ] Resolve eBPF framework dependency (aya pulls in tokio; evaluate alternatives or workaround)
 - [ ] Add eBPF framework dependency to main crate's `ebpf` feature
 - [ ] Implement actual eBPF program loading in `EbpfCapture::try_new()`
@@ -548,6 +551,7 @@ afpacket mode (forced):
 - [ ] Integration testing (requires Linux 5.8+ environment)
 
 ### Phase 3: Optimization and Polish
+
 - [ ] Ring buffer to replace perf buffer
 - [ ] UDP attribution improvements
 - [ ] cgroup awareness

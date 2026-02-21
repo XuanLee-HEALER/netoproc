@@ -27,6 +27,7 @@
 **触发方式**：`netoproc --duration <秒数>`，例如 `netoproc --duration 10`
 
 **语义**：
+
 - 程序启动后运行恰好 `duration` 秒的数据采集
 - 采集结束后输出**一次**统计结果，然后退出
 - 输出内容：在 duration 时间窗口内，每个进程的累计上行/下行字节数、包数，按流量降序排列
@@ -41,6 +42,7 @@
 **触发方式**：`netoproc`（无 `--duration` 参数）或 `netoproc --monitor`
 
 **语义**：
+
 - 程序持续运行，展示实时滚动更新的流量统计 TUI 界面
 - 每当统计线程处理完一批 channel 数据，立即刷新 UI（数据驱动，而非定时器驱动）
 - 由于 BPF read 超时为 500ms，实际 UI 刷新频率约为每 500~800ms 一次
@@ -52,7 +54,7 @@
 
 ### 3.1 总体结构
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        主线程（统计线程）                        │
 │                                                             │
@@ -134,6 +136,7 @@ ioctl_set(&fd, BIOCSRTIMEOUT, &timeout)?;
 ```
 
 **行为说明**：
+
 - 正常流量下，缓冲区不会在 500ms 内填满，`read()` 每 500ms 超时返回一次
 - 流量突发时，缓冲区可能提前填满，`read()` 提前返回，属于正常现象
 - 每次 `read()` 返回的数据量不固定，统计线程不应假设固定批次大小
@@ -277,7 +280,7 @@ fn drain_final(
 
 此类进程的流量被计入 `ProcessKey::Unknown`。在输出时，Unknown 条目必须显示，让用户知晓存在无法归因的流量，而非静默丢弃。输出格式示例：
 
-```
+```text
 PROCESS              RX           TX
 chrome (pid 1234)    1.2 MB       340 KB
 curl   (pid 5678)    0 B          12 KB
@@ -334,7 +337,7 @@ let table = process_table.load();
 
 ### 7.1 启动顺序
 
-```
+```text
 1. 解析命令行参数，确定模式（snapshot/monitor）和 duration 参数
 2. 首次调用 libproc，构建初始 ProcessTable
 3. 将 ProcessTable 包装为 Arc<ArcSwap<ProcessTable>>
@@ -349,7 +352,7 @@ let table = process_table.load();
 
 **Snapshot 模式（正常到期退出）**：
 
-```
+```text
 1. duration 到期，统计线程检测到
 2. 调用 drain_final()：
    a. 设置 shutdown_signal = true
@@ -363,7 +366,7 @@ let table = process_table.load();
 
 **Monitor 模式（Ctrl-C）**：
 
-```
+```text
 1. 注册 Ctrl-C handler（使用 ctrlc crate 或 signal-hook）
 2. handler 中设置 shutdown_signal = true
 3. 统计线程主循环检测到 shutdown_signal，退出循环

@@ -6,7 +6,7 @@ netop uses a streaming three-thread architecture to separate blocking I/O
 (BPF packet capture), process table maintenance, and traffic statistics /
 UI rendering into independent execution contexts.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    Main Thread (Stats + UI)                   │
 │                                                               │
@@ -45,6 +45,7 @@ UI rendering into independent execution contexts.
 ### Snapshot Mode
 
 In snapshot mode, the main thread:
+
 1. Accumulates `HashMap<ProcessKey, TrafficStats>` from packet batches.
 2. After the specified duration, calls `drain_final()` to join BPF threads
    and drain remaining channel data.
@@ -59,7 +60,7 @@ main thread with its existing event loop and views.
 
 ## 2. Module Decomposition
 
-```
+```text
 src/
 ├── main.rs                 Entry point: privilege check, CLI parse, mode dispatch
 ├── cli.rs                  CLI argument definitions (clap derive)
@@ -126,6 +127,7 @@ netoproc-requirements.md Section 6. Validates ranges (interval 0.1-10.0, bpf-buf
 opens with `O_RDONLY`, configures with ioctls. Returns Vec of owned fds.
 
 **error.rs**: Central error type:
+
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum NetopError {
@@ -241,7 +243,7 @@ auto-scaling units. `FilterBar` renders the text input area.
 
 ### 3.1 Thread Model Detail (v0.2.0)
 
-```
+```text
 Thread 1: BPF Capture (one per interface)
   let mut pkt_buf = Vec::new();
   loop {
@@ -287,11 +289,13 @@ Main Thread: Stats + Output
 ### 3.2 Data Sharing: ArcSwap
 
 The `arc_swap` crate provides `ArcSwap<T>`, which allows:
+
 - **Writer** (stats poller): `store(Arc::new(new_state))` — O(1), atomic pointer swap.
 - **Reader** (TUI): `load()` — returns a `Guard` that derefs to `&T`. Lock-free,
   wait-free, no contention with writer.
 
 This is preferred over `RwLock` because:
+
 - Readers never block writers (no priority inversion).
 - Readers never block each other.
 - The cost is one extra `Arc` clone per read (negligible).
@@ -303,6 +307,7 @@ Use `std::sync::mpsc::sync_channel::<Vec<PacketSummary>>(8)` — a bounded chann
 of packet batches with capacity 8.
 
 Rationale for batch channel with capacity 8:
+
 - Each BPF `read()` blocks for up to 500ms (read timeout). The resulting batch
   is sent as a single `Vec<PacketSummary>`.
 - Capacity 8 = 4 seconds of headroom before backpressure starts.
@@ -318,6 +323,7 @@ Uses a global `AtomicBool` (`SHUTDOWN_REQUESTED`) set by SIGTERM/SIGINT signal
 handlers and checked by all threads.
 
 **Snapshot mode (duration expired)**:
+
 1. Main thread detects `elapsed >= duration`.
 2. Calls `drain_final()`: sets `SHUTDOWN_REQUESTED = true`, joins BPF threads
    (which drop their `SyncSender`), drains remaining channel data.
@@ -326,6 +332,7 @@ handlers and checked by all threads.
 5. Exit code 0.
 
 **Monitor mode (Ctrl-C or `q`)**:
+
 1. TUI exits its event loop.
 2. Main thread sets `SHUTDOWN_REQUESTED = true`.
 3. Joins bridge thread, BPF threads, process refresh thread, DNS thread.
@@ -336,7 +343,7 @@ handlers and checked by all threads.
 
 ### 4.1 Device Acquisition
 
-```
+```text
 fn open_bpf_device() -> Result<OwnedFd, NetopError> {
     for i in 0..256 {
         let path = format!("/dev/bpf{}", i);
@@ -358,7 +365,7 @@ fn open_bpf_device() -> Result<OwnedFd, NetopError> {
 
 After opening `/dev/bpfN`:
 
-```
+```text
 1. BIOCSBLEN(buffer_size)      // Set read buffer size (default 2 MB)
 2. BIOCSETIF(interface_name)   // Bind to network interface
 3. BIOCSRTIMEOUT(500ms)        // Set read timeout (500ms)
@@ -378,7 +385,7 @@ The read buffer (`Vec<u8>`) is allocated to `actual_size` after step 6.
 
 **General traffic filter** — captures all IPv4 and IPv6 packets, headers only:
 
-```
+```text
 // Pseudo-code for BPF filter instructions:
 // Accept all IP packets, kernel truncates to BIOCSBLEN (66 bytes for IPv4+TCP max header)
 ldh [12]                    // Load EtherType from Ethernet header offset 12
@@ -394,7 +401,7 @@ bytes as a safe maximum.
 
 **DNS filter** — captures packets on port 53 with full DNS payload:
 
-```
+```text
 // Accept UDP or TCP packets with src or dst port 53
 ldh [12]                         // EtherType
 jeq #0x0800, ipv4, drop          // IPv4 only for simplicity (extend for IPv6)
@@ -423,13 +430,14 @@ header offsets using the IP Header Length (IHL) field for IPv4 and the fixed
 Each `read()` from a BPF device returns one or more packets packed into the
 buffer. The format is:
 
-```
+```text
 ┌──────────┬────────────┬─────────┬──────────┬────────────┬─────────┐
 │ bpf_hdr  │  packet 1  │ padding │ bpf_hdr  │  packet 2  │ padding │ ...
 └──────────┴────────────┴─────────┴──────────┴────────────┴─────────┘
 ```
 
 `bpf_hdr` fields:
+
 - `bh_tstamp`: timestamp (struct timeval)
 - `bh_caplen`: captured bytes
 - `bh_datalen`: original packet length
@@ -442,7 +450,7 @@ Advance to next packet: `offset += BPF_WORDALIGN(bpf_hdr.bh_hdrlen + bpf_hdr.bh_
 
 Implements RFC 1035 Section 4 parsing:
 
-```
+```text
 DNS Message Format:
 ┌──────────────────────┐
 │      Header (12B)    │  ID, Flags, Counts
@@ -536,6 +544,7 @@ extern "C" {
 ```
 
 Process enumeration strategy:
+
 1. Call `proc_listpids` with a buffer of 4096 PIDs (covers most systems).
    If full, double and retry.
 2. For each PID, call `proc_name` to get the short name.
@@ -569,7 +578,8 @@ fn list_tcp_connections() -> Result<Vec<RawTcpConnection>> {
 ```
 
 Buffer structure:
-```
+
+```text
 ┌──────────────┐
 │  xinpgen     │  Generation count header
 ├──────────────┤
@@ -584,6 +594,7 @@ Buffer structure:
 ```
 
 `xtcpcb_n` contains:
+
 - `xt_inp`: Internet PCB with local/remote sockaddr, interface index
 - `xt_tp`: TCP state (ESTABLISHED, LISTEN, etc.)
 - TCP-specific fields: send window, receive window, RTT estimates (if available)
@@ -778,7 +789,7 @@ impl AggregatedTimeSeries {
 The correlation engine is the most complex component. It joins data from four
 sources into the unified `SystemNetworkState`:
 
-```
+```text
 Input Sources:
   1. process.rs  → Vec<RawProcess>       (PID, name, uid, socket fds)
   2. connection.rs → Vec<RawTcpConnection>, Vec<RawUdpConnection>
@@ -800,6 +811,7 @@ Join Keys:
 4. If not found: accumulate into the "unattributed" counter.
 
 **Direction determination**:
+
 - Maintain a set of `(protocol, local_addr, local_port)` tuples for all LISTEN
   sockets.
 - If a connection's local port appears in this LISTEN set, direction = Inbound.
@@ -877,7 +889,7 @@ pub struct socket_fdinfo {
 
 ### 7.4 Safety Boundary
 
-```
+```text
         ┌─────────────────────────────────────┐
         │          Safe Rust APIs              │
         │                                     │

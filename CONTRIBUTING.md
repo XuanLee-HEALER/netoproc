@@ -30,7 +30,7 @@ Use the [Feature Request](https://github.com/XuanLee-HEALER/netoproc/issues/new?
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-```
+```text
 feat: add IPv6 jumbogram support
 fix: correct BPF filter jump offset for UDP
 docs: update netoproc-usage.md with new --no-dns flag
@@ -62,7 +62,7 @@ Sign off your commits with `git commit -s` to certify the [Developer Certificate
 
 ## Project Structure
 
-```
+```text
 src/
 ├── bpf/       # BPF device, packet parsing, filters
 ├── system/    # macOS system APIs (processes, sockets, DNS config)

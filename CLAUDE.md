@@ -15,11 +15,13 @@ netoproc-usage.md for full specifications.
 ### Preferred Tool Usage
 
 When performing project tasks, **always use `just` recipes or `cargo` commands** instead of:
+
 - Directly reading/writing source files to understand build state — run `cargo check` instead
 - Running raw shell commands for build/test/lint — run `just <recipe>` instead
 - Manual multi-step processes — define a `just` recipe if one doesn't exist
 
 Priority order:
+
 1. `just <recipe>` — for any defined workflow
 2. `cargo <subcommand>` — for Rust-specific operations not covered by just
 3. Direct file editing — only when writing or modifying source code
@@ -29,7 +31,7 @@ Priority order:
 
 The project uses a `justfile` at the project root. Key recipes:
 
-```
+```bash
 just build          # cargo build
 just release        # cargo build --release
 just test           # cargo test (unit tests, no sudo)
@@ -62,6 +64,7 @@ Run `just --list` to see all available recipes.
 ## Architecture Quick Reference
 
 Three-thread streaming model (v0.2.0):
+
 - **BPF capture thread**: blocking read on `/dev/bpfN`, sends `Vec<PacketSummary>` batches via `sync_channel(8)`
 - **Process refresh thread**: rebuilds `ProcessTable` every 500ms, publishes via `ArcSwap`
 - **Main thread (stats)**: drains packet channel, attributes to processes via `ProcessTable` lookup, accumulates `TrafficStats`
@@ -73,7 +76,7 @@ See netoproc-design.md §2 for full module map.
 
 ## Testing
 
-```
+```bash
 just test           # unit tests only (no sudo needed)
 just test-all       # all tests (requires sudo)
 just clippy         # lint check
@@ -95,6 +98,7 @@ See netoproc-design.md §9 for rationale.
 ## Common Workflows
 
 ### Adding a new module
+
 1. Create the file under the appropriate directory (bpf/, system/, model/, etc.)
 2. Add `mod <name>;` to the parent `mod.rs`
 3. Run `just check` to verify compilation
@@ -102,6 +106,7 @@ See netoproc-design.md §9 for rationale.
 5. Run `just test` to verify
 
 ### Modifying data model
+
 1. Edit structs in `src/model/mod.rs`
 2. Update TSV serializer in `src/output/tsv.rs` (column order must match netoproc-requirements.md FR-5.5)
 3. Update JSON serializer in `src/output/json.rs`
@@ -109,7 +114,8 @@ See netoproc-design.md §9 for rationale.
 5. If field names changed, update netoproc-requirements.md §7 as the single source of truth
 
 ### Running the application
-```
+
+```bash
 just run                                          # TUI mode (default)
 sudo cargo run -- --duration 5                    # snapshot mode (TSV, 5 seconds)
 sudo cargo run -- --duration 5 --format json      # snapshot JSON

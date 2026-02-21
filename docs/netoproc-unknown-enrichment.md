@@ -14,7 +14,7 @@
 
 **改进前**：
 
-```
+```text
 PROCESS              RX           TX
 chrome (pid 1234)    1.2 MB       340 KB
 unknown              890 KB       120 KB
@@ -22,7 +22,7 @@ unknown              890 KB       120 KB
 
 **改进后**：
 
-```
+```text
 PROCESS              RX           TX
 chrome (pid 1234)    1.2 MB       340 KB
 unknown (system)     890 KB       120 KB
@@ -37,7 +37,7 @@ unknown (system)     890 KB       120 KB
 
 对同一个远端地址，按以下优先级展示：
 
-```
+```text
 1. 反向 DNS 域名（最可读，异步获取）
 2. 已知 IP 段标注（内置映射表，同步）
 3. 已知端口标注（内置映射表，同步）
@@ -52,7 +52,7 @@ unknown (system)     890 KB       120 KB
 
 Unknown 流量在统计线程中正常聚合，额外维护一张按远端地址分组的连接表，供 UI 展开显示：
 
-```
+```text
 统计线程
   ├── HashMap<ProcessKey, TrafficStats>   ← 现有，用于主列表
   └── HashMap<SocketAddr, ConnectionStats> ← 新增，Unknown 流量按远端地址分组
@@ -100,7 +100,7 @@ pub struct StatsState {
 
 DNS 解析在独立线程池中执行，通过 channel 将结果回传给统计线程：
 
-```
+```text
 统计线程
   ├── 发现新的 Unknown 远端 IP
   ├── 检查 dns_cache：未命中则发送查询请求
@@ -340,7 +340,7 @@ pub fn get_annotation(remote: SocketAddr, proto: Protocol) -> Option<String> {
 
 示例输出：
 
-```
+```text
 17.57.144.83:443  → "Apple 推送/iCloud · HTTPS"
 8.8.8.8:53        → "Google DNS · DNS 查询"
 192.168.1.1:53    → "本地网络 · DNS 查询"
@@ -355,7 +355,7 @@ pub fn get_annotation(remote: SocketAddr, proto: Protocol) -> Option<String> {
 
 Unknown 条目在主列表中显示聚合流量，支持展开查看按远端地址分组的明细：
 
-```
+```text
 unknown (system)     890 KB    120 KB     [可展开]
   └── courier.push.apple.com:443    ↓ 430 KB   Apple 推送/iCloud · HTTPS
       (查询中...)                   ↓ 210 KB   本地网络 · DNS 查询
@@ -368,7 +368,7 @@ unknown (system)     890 KB    120 KB     [可展开]
 
 远端地址展示时按以下优先级选择显示内容：
 
-```
+```text
 1. 反向 DNS 域名（已解析）：courier.push.apple.com:443
 2. DNS 解析中：显示原始 IP，附加"(解析中...)"标注
 3. DNS 解析失败/超时：显示原始 IP + IP 段标注
@@ -393,7 +393,7 @@ entries.truncate(10);
 
 Snapshot 模式下，Unknown 明细以缩进文本形式输出：
 
-```
+```text
 PROCESS                  RX          TX
 chrome (pid 1234)        1.2 MB      340 KB
 unknown (system)         890 KB      120 KB
