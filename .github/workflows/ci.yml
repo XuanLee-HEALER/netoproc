@@ -148,9 +148,11 @@ jobs:
         # Section 1 (TC-WIN-1..12): cross-platform library tests.
         # Section 2 (TC-WIN-B1..5): binary CLI tests — --help, --version,
         # invalid args, and capture-mode warnings all work without Administrator.
-        # TC-WIN-B4 (permission error) verifies the correct error exit code
-        # when raw-socket creation fails for a non-admin user.
-        run: cargo test --test windows_integration
+        # TC-WIN-B4 is skipped here: GitHub Actions Windows runners execute as
+        # 'runneradmin' (Administrator), so raw-socket creation succeeds and the
+        # permission-error test does not apply in this CI environment. It remains
+        # valid for manual testing on a non-admin Windows machine.
+        run: cargo test --test windows_integration -- --skip binary_tests::tc_win_b4_permission_error
 
   # ---------------------------------------------------------------------------
   # Release build + artifact upload (macOS)

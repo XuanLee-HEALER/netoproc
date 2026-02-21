@@ -314,7 +314,9 @@ fn tc_win_8_port_byte_order() {
     assert_eq!(win_port(0x0100), 1, "port 1");
 
     // Roundtrip: all common ports
-    for port in [22u16, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 8080, 27017] {
+    for port in [
+        22u16, 25, 53, 80, 110, 143, 443, 993, 3306, 5432, 8080, 27017,
+    ] {
         let dw = port.to_be() as u32;
         assert_eq!(win_port(dw), port, "roundtrip failed for port {port}");
     }
